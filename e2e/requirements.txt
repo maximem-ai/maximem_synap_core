@@ -1,0 +1,2 @@
+pytest>=8
+maximem-synap>=0.6.13

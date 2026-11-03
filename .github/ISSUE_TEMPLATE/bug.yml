@@ -1,0 +1,54 @@
+name: Bug report
+description: Something in Synap Core does not work as documented.
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Commit or release
+      description: "The output of `git rev-parse --short HEAD` in your clone, or the release tag."
+      placeholder: "e.g. 21e774c or v0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How you run it
+      options:
+        - docker compose from this repository
+        - My own image or build
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and Docker version
+      placeholder: "e.g. Ubuntu 24.04, Docker 27.3"
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model provider and model name
+      description: "Never the key."
+      placeholder: "e.g. openai / gpt-4o-mini, or ollama / llama3.1"
+    validations:
+      required: true
+  - type: input
+    id: sdk
+    attributes:
+      label: SDK and version (if the problem is in a call)
+      placeholder: "e.g. maximem-synap 0.6.13"
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you did, what you expected, and what happened instead
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server log
+      description: "From `docker compose -f deploy/docker-compose.yml logs synap`. Remove anything private. Do not paste keys or memories with personal data."
+      render: text

@@ -1,0 +1,15 @@
+Current record:
+[[RECORD]]
+
+[[RECAPS]]New turns [[SPAN]]:
+
+[[TURNS]]
+
+Length target: about [[BUDGET]] tokens for the item text of these turns. Ledger values do not count.
+
+[[DENSITY_GUIDANCE]]
+
+Agent guidance:
+[[GUIDANCE]]
+
+Return the JSON object.

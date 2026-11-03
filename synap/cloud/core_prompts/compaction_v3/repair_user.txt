@@ -1,0 +1,7 @@
+Your previous reply failed these checks:
+[[PROBLEMS]]
+
+Your previous reply:
+[[DRAFT]]
+
+Return the complete corrected JSON object in the same shape. Change only what the problems need. Keep every id, label and turn label valid.

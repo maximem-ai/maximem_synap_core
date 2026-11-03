@@ -1,0 +1,54 @@
+# Global DB configuration registry
+# Environment variable substitution via ${VAR_NAME}
+
+defaults:
+  rdbms: "postgres"
+  vector: "chromadb"
+  graph: "neo4j"
+  file: "s3"
+  reporting: "timescaledb"
+
+stores:
+  postgres:
+    type: "rdbms"
+    host: "${POSTGRES_HOST}"
+    port: 5432
+    database: "${POSTGRES_DB}"
+    user: "${POSTGRES_USER}"
+    password: "${POSTGRES_PASSWORD}"
+    pool_size: 10
+
+  chromadb:
+    type: "vector"
+    host: "${CHROMA_HOST}"
+    port: "${CHROMA_PORT}"
+    auth_token: "${CHROMA_AUTH_TOKEN}"
+
+  neo4j:
+    type: "graph"
+    uri: "${NEO4J_URI}"
+    user: "${NEO4J_USER}"
+    password: "${NEO4J_PASSWORD}"
+    database: "neo4j"
+    pool_size: 50
+
+  s3:
+    type: "file"
+    bucket: "${S3_BUCKET}"
+    region: "${AWS_REGION}"
+    endpoint_url: "${S3_ENDPOINT_URL}"
+    access_key_id: "${AWS_ACCESS_KEY_ID}"
+    secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+
+  local:
+    type: "file"
+    root: "${SYNAP_ORIGINALS_DIR}"
+
+  timescaledb:
+    type: "reporting"
+    host: "${TIMESCALE_HOST}"
+    port: 5432
+    database: "${TIMESCALE_DB}"
+    user: "${TIMESCALE_USER}"
+    password: "${TIMESCALE_PASSWORD}"
+    pool_size: 5

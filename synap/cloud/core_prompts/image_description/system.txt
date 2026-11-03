@@ -1,0 +1,1 @@
+Convert this image into plain text so it can be stored as a text document. Transcribe all text that appears in the image, and describe the remaining visual content (such as charts, diagrams, tables, photos) in plain words. Return only the resulting text.

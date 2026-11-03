@@ -1,0 +1,74 @@
+Synap Core
+Copyright 2026 Maximem AI
+
+This product includes software developed at Maximem AI (https://www.maximem.ai/).
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file.
+
+
+Third-party material
+====================
+
+Included in this repository
+---------------------------
+
+1. cl100k_base tokenizer vocabulary
+   File: synap/cloud/shared/data/cl100k_base.tiktoken
+   What it is: OpenAI's cl100k_base byte-pair vocabulary, in the format of the tiktoken
+   library, used to count tokens when the library cannot download it. The server checks
+   the file against a fixed SHA-256 before it uses it.
+   Source: https://github.com/openai/tiktoken (MIT License, Copyright (c) 2022 OpenAI,
+   Shantanu Jain). The vocabulary is published by OpenAI for use with tiktoken.
+
+2. LongMemEval questions and answers
+   File: benchmarks/results/longmemeval/question_records.json
+   What it is: the 500 questions and reference answers of LongMemEval (Wu et al.,
+   ICLR 2025, https://arxiv.org/abs/2410.10813), with this project's retrieved memories
+   and results, and quoted excerpts of the conversation sessions the questions refer to.
+   Source: https://github.com/xiaowu0162/LongMemEval and
+   https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned, both under the MIT
+   License. The dataset's filler sessions come from ShareGPT and UltraChat, as its authors
+   describe; excerpts of them keep whatever terms those sources carry.
+
+   MIT License
+
+   Copyright (c) 2024 Di Wu
+
+   Permission is hereby granted, free of charge, to any person obtaining a copy of this
+   software and associated documentation files (the "Software"), to deal in the Software
+   without restriction, including without limitation the rights to use, copy, modify,
+   merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+   permit persons to whom the Software is furnished to do so, subject to the following
+   conditions:
+
+   The above copyright notice and this permission notice shall be included in all copies
+   or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+   INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+   PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+   HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+   CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+   OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+Downloaded on first start (not included in this repository or in the Docker image)
+------------------------------------------------------------------------------------
+
+The server downloads these once, at the versions pinned in synap/boot/first_start.py,
+and checks each file against a stored hash. They are separate works under their own
+licenses.
+
+3. Snowflake Arctic Embed L v2.0 (Snowflake/snowflake-arctic-embed-l-v2.0), the embedding
+   model. Apache License 2.0. https://huggingface.co/Snowflake/snowflake-arctic-embed-l-v2.0
+
+4. all-MiniLM-L6-v2 (sentence-transformers/all-MiniLM-L6-v2), the model that matches
+   entity names. Apache License 2.0. https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
+
+5. spaCy (https://spacy.io, MIT License, Copyright Explosion) and its en_core_web_sm 3.7.1
+   English model, MIT License, from https://github.com/explosion/spacy-models. The model
+   was trained on OntoNotes 5 and WordNet 3.0 data, which have their own terms; see the
+   model's page.
+
+The Python packages the server installs (listed in requirements.txt) are separate
+works under their own licenses.

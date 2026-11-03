@@ -1,0 +1,7 @@
+Existing memory:
+{existing_content}
+
+New memory:
+{new_content}
+
+Classify how the new memory relates to the existing memory.

@@ -1,0 +1,10 @@
+# Synap Core memory config: a business app.
+#
+# Your app has customers (companies, teams) with users under them, so every write and every fetch
+# sends both a customer id and a user id ("strict"). Copy this file over config/memory.yml before you
+# store anything. Changing the mode after memories exist is not supported.
+#
+# Everything else uses the built-in defaults.
+storage_architecture:
+  scoping:
+    user_context_isolation: strict
