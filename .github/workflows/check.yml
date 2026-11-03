@@ -1,0 +1,85 @@
+name: Check pull request
+
+# Runs on every pull request, with no secret and no model key, so it also runs for a pull request from a fork.
+# It does NOT run the end-to-end suite (e2e/), which needs a model key: the reviewer runs that by hand for a change
+# to deploy/, config/, the Dockerfile or .env.example (see CONTRIBUTING.md).
+#
+# Third-party actions are pinned by commit SHA, with the version in a comment. Dependabot moves them.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose:
+    name: Compose file
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: The file is valid
+        run: docker compose -f deploy/docker-compose.yml config --quiet
+
+      - name: Every service caps its log
+        run: |
+          docker compose -f deploy/docker-compose.yml config --format json \
+            | jq -e '[.services[] | .logging.options["max-size"]] | all(. != null)'
+
+      - name: Every store has a healthcheck, and the server waits for each of them
+        run: |
+          docker compose -f deploy/docker-compose.yml config --format json | jq -e '
+            . as $c
+            | ([$c.services | to_entries[] | select(.key | IN("postgres","redis","chroma","neo4j")) | .value.healthcheck] | all(. != null))
+            and ([$c.services.synap.depends_on | to_entries[] | select(.key | IN("redis","neo4j","chroma")) | .value.condition] | all(. == "service_healthy"))'
+
+      - name: The API port is loopback only, and SYNAP_PORT changes it
+        run: |
+          docker compose -f deploy/docker-compose.yml config --format json | jq -e '.services.synap.ports == [{"mode":"ingress","host_ip":"127.0.0.1","target":8000,"published":"8000","protocol":"tcp"}]'
+          SYNAP_PORT=8010 docker compose -f deploy/docker-compose.yml config --format json | jq -e '.services.synap.ports[0].published == "8010"'
+
+      - name: No store publishes a port
+        run: |
+          docker compose -f deploy/docker-compose.yml config --format json \
+            | jq -e '[.services | to_entries[] | select(.key != "synap") | .value.ports // []] | all(length == 0)'
+
+  skill-tests:
+    name: Setup skill tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install pytest
+      - run: python -m pytest skills/synap-core/tests -q
+
+  image:
+    name: Image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build, without pushing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          push: false
+          tags: synap-core:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: The image has the CPU build of PyTorch and runs as an ordinary user
+        run: |
+          docker run --rm --entrypoint python synap-core:ci -c "import torch; assert torch.version.cuda is None, torch.version.cuda; print('torch', torch.__version__)"
+          test "$(docker run --rm --entrypoint id synap-core:ci -u)" != "0"

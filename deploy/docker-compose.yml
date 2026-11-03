@@ -1,0 +1,257 @@
+# Synap Core: the server and the four stores it needs.
+#
+#   cp .env.example .env      # then add your LLM key
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# Passwords are generated on the first run by the `secrets` step and kept in the `state`
+# volume. They are never in this file, in git or in the image, and no store publishes a port.
+# Every store image is pinned by version AND digest; to move one, change both.
+
+name: synap-core
+
+x-synap-env: &synap-env
+  SYNAP_EDITION: core
+  HF_HOME: /models
+  HF_HUB_DISABLE_TELEMETRY: "1"
+  # Both models are downloaded once by first-start, at pinned revisions, and loaded from the volume. Offline
+  # mode means no start and no first memory ever contacts huggingface.co, and the server only reads /models,
+  # so it works as any user (SYNAP_USER).
+  HF_HUB_OFFLINE: "1"
+  # Offline on purpose: the models load from the cache, and the library would warn "could not reach the Hub" on every load.
+  HF_HUB_VERBOSITY: "error"
+  # The Chroma client sends usage statistics unless told not to (the server container has its own setting).
+  ANONYMIZED_TELEMETRY: "FALSE"
+  DO_NOT_TRACK: "1"
+  PYTHONPATH: /models/spacy
+  SYNAP_FILE_STORE: local
+  SYNAP_ORIGINALS_DIR: /app/originals
+  CHROMA_HOST: chroma
+  CHROMA_PORT: "8000"
+  NEO4J_URI: bolt://neo4j:7687
+  NEO4J_USER: neo4j
+
+# Docker keeps each container's log in one file with no size limit, and the server logs at INFO, so a machine that
+# runs for months would fill its disk. Every service keeps at most 3 files of 10 MB. Change the numbers here.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# The server image is also the one that applies the schema and downloads the models.
+x-synap-image: &synap-image
+  image: ${SYNAP_IMAGE:-synap-core:local}
+  # By default the image is built from the Dockerfile and never pulled (pulling a local name prints
+  # "pull access denied"). To run a published image instead, set both in your shell:
+  #   SYNAP_IMAGE=ghcr.io/maximem-ai/maximem_synap_core:latest SYNAP_PULL_POLICY=always
+  pull_policy: ${SYNAP_PULL_POLICY:-build}
+  build:
+    context: ..
+    dockerfile: Dockerfile
+
+services:
+  secrets:
+    image: redis:7.4.2-alpine@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ ! -s /state/secrets.env ]; then
+          umask 077
+          gen() { tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32; }
+          printf 'POSTGRES_PASSWORD=%s\nREDIS_PASSWORD=%s\nNEO4J_PASSWORD=%s\n' "$$(gen)" "$$(gen)" "$$(gen)" > /state/secrets.env
+          echo "secrets: generated"
+        else
+          echo "secrets: already there"
+        fi
+        # The file is written here as root. The server and the schema step run as an ordinary user
+        # (SYNAP_USER), so it must belong to that user and be readable by nobody else. Root, which the
+        # stores run as, reads it anyway.
+        chown ${SYNAP_USER:-10001:10001} /state/secrets.env
+        # originals/ is a bind mount. On a fresh clone it does not exist yet, so Docker creates it owned
+        # by root, and the server (SYNAP_USER) could not write to it and would stop at start. Hand it to
+        # that user here. Docker Desktop maps file owners itself, so a refusal there is not an error.
+        chown ${SYNAP_USER:-10001:10001} /originals || echo "originals: owner not changed (fine on Docker Desktop)"
+        chmod 755 /originals || true
+        chmod 400 /state/secrets.env
+    volumes:
+      - state:/state
+      - ../originals:/originals
+    logging: *logging
+
+  postgres:
+    image: pgvector/pgvector:0.8.1-pg15@sha256:94aee7e88f98125114657cab98e28c5dfa8dd517a6bf83fd98b503439f1e3de6
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: synap
+      POSTGRES_DB: synap
+    entrypoint:
+      - sh
+      - -c
+      - . /state/secrets.env && export POSTGRES_PASSWORD && exec docker-entrypoint.sh postgres
+    volumes:
+      - state:/state:ro
+      - postgres-data:/var/lib/postgresql/data
+    depends_on:
+      secrets: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synap -d synap"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *logging
+
+  redis:
+    image: redis:7.4.2-alpine@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
+    restart: unless-stopped
+    entrypoint:
+      - sh
+      - -c
+      - . /state/secrets.env && exec docker-entrypoint.sh redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes
+    volumes:
+      - state:/state:ro
+      - redis-data:/data
+    depends_on:
+      secrets: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD-SHELL", ". /state/secrets.env && redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *logging
+
+  chroma:
+    image: ghcr.io/chroma-core/chroma:1.5.9@sha256:1e0b73a187a28757c572acba508c46f48c9e8b0acaf5c20e6d95cdedce1acdf6
+    restart: unless-stopped
+    environment:
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /data
+      ANONYMIZED_TELEMETRY: "FALSE"
+    # Without this, writes fail with code 14 once enough collections are open.
+    ulimits:
+      nofile: {soft: 65536, hard: 65536}
+    volumes:
+      - chroma-data:/data
+    # The image has no curl, wget or python, only bash, so the check opens the port with bash and asks for the heartbeat.
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - 'exec 3<>/dev/tcp/127.0.0.1/8000 && printf "GET /api/v2/heartbeat HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3 && head -n1 <&3 | grep -q " 200 "'
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *logging
+
+  neo4j:
+    image: neo4j:5.26.4-community@sha256:b3bafbd02e8676a4af5b08edbe029ab727eb3862496aa811a0e01003ae9afc7f
+    restart: unless-stopped
+    environment:
+      # Neo4j reports usage (edition, packaging, database count, the server's IP address) to Neo4j by default.
+      # Synap Core sends no usage statistics, so this store is told not to either.
+      NEO4J_dbms_usage__report_enabled: "false"
+    entrypoint:
+      - sh
+      - -c
+      - . /state/secrets.env && export NEO4J_AUTH="neo4j/$$NEO4J_PASSWORD" && exec tini -g -- /startup/docker-entrypoint.sh neo4j
+    volumes:
+      - state:/state:ro
+      - neo4j-data:/data
+    depends_on:
+      secrets: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # Applies the baseline schema to an empty database, then any later numbered files. Safe to repeat.
+    logging: *logging
+
+  schema:
+    <<: *synap-image
+    restart: "no"
+    user: ${SYNAP_USER:-10001:10001}
+    environment: *synap-env
+    command:
+      - sh
+      - -c
+      - |
+        . /state/secrets.env
+        export DATABASE_URL="postgresql://synap:$$POSTGRES_PASSWORD@postgres:5432/synap"
+        exec python -m synap.db.runner
+    volumes:
+      - state:/state:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  # Downloads the embedding model and the spaCy model into the model volume, once.
+  # The server does not start until this has finished.
+    logging: *logging
+
+  first-start:
+    <<: *synap-image
+    restart: "no"
+    environment: *synap-env
+    command: ["python", "-m", "synap.boot.first_start"]
+    env_file:
+      - path: ../.env
+        required: false
+    volumes:
+      - models:/models
+    logging: *logging
+
+  synap:
+    <<: *synap-image
+    restart: unless-stopped
+    environment: *synap-env
+    command:
+      - sh
+      - -c
+      - |
+        . /state/secrets.env
+        export DATABASE_URL="postgresql://synap:$$POSTGRES_PASSWORD@postgres:5432/synap"
+        export REDIS_URL="redis://:$$REDIS_PASSWORD@redis:6379/0"
+        export NEO4J_PASSWORD
+        exec uvicorn synap.cloud.application.main:app --host 0.0.0.0 --port 8000
+    user: ${SYNAP_USER:-10001:10001}
+    # So http://host.docker.internal reaches an Ollama running on this machine, on Linux as well as Docker Desktop.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: ../.env
+        required: false
+    # Loopback only: the server has no login by default. Put your own proxy in front to expose it.
+    # If port 8000 is taken on this machine, set SYNAP_PORT in your shell (see .env.example).
+    ports:
+      - "127.0.0.1:${SYNAP_PORT:-8000}:8000"
+    volumes:
+      - state:/state:ro
+      - models:/models
+      # Read-write: the MACA plugin saves memory.generated.yml and its job files here. It never writes memory.yml.
+      - ../config:/app/config
+      - ../originals:/app/originals
+    depends_on:
+      schema: {condition: service_completed_successfully}
+      first-start: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      neo4j: {condition: service_healthy}
+      chroma: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    logging: *logging
+
+volumes:
+  state:
+  postgres-data:
+  redis-data:
+  chroma-data:
+  neo4j-data:
+  models:

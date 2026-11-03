@@ -1,0 +1,12 @@
+quote_action: The action "[[ACTION]]" cites turn [[M]], but no turn contains the words "[[QUOTE]]". Quote the exact words from the turn, or remove the action.
+quote_none: The action "[[ACTION]]" has no quote. Add one or two quotes copied word for word from the cited turn, or remove the action.
+quote_value: The value "[[VALUE]]" (label "[[LABEL]]") is not in turn [[M]]. Copy the value exactly as written in that turn, or remove it.
+structure_header: The section header "[[HEADER]]" is not allowed. Do not give a header; edit existing sections by id only.
+structure_unknown_id: There is no section with the id "[[ID]]". Use an id that exists in the record.
+literal: The value "[[VALUE]]" in turn [[M]] is missing from the ledger. Add it to literals with a label, or as a replacement of the earlier value.
+coverage: The item "[[ITEM]]" from turn [[M]] is not in the record. Keep it in its section, with its reason or response.
+promise: Turn [[M]] contains the promise "[[SENTENCE]]" that is not in agreed_actions. Add it with who, what and a quote.
+suggestion: The assistant's suggestion "[[SENTENCE]]" in turn [[M]] is not carried by any item. Add an advice item for it.
+response: The advice "[[ITEM]]" in turn [[M]] has a why that is not what the next turn said. Make why the other side's actual reply, or leave it empty.
+size_over: The items grew the record by [[GROWTH]] tokens; the target is at most [[MAX]]. Tighten the wording without dropping anything of substance.
+size_under: The items grew the record by only [[GROWTH]] tokens; about [[MIN]] or more is expected. Re-read the turns for missed facts, conditions and values; do not pad.

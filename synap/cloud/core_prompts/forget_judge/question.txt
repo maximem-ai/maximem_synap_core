@@ -1,0 +1,1 @@
+Rate only the stored text at position [[INDEX]]: does it hold the thing the person asked to forget?

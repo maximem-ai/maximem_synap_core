@@ -1,0 +1,73 @@
+# Base compaction template
+# All other templates inherit from this
+# MACA config can override any value
+
+category: "base"
+version: "1.0.0"
+
+# Default priority extraction rules
+# Categories: high (always extract), medium (extract if space), low (extract minimally)
+priority_extraction:
+  high:
+    - explicit_facts
+    - decisions
+    - constraints
+    - current_objective
+  medium:
+    - user_preferences
+    - open_questions
+    - dependencies
+  low:
+    - background_context
+    - general_explanations
+
+# Default summarization guidelines
+summarization_guidelines:
+  focus:
+    - "Main objective and progress toward it"
+    - "Key decisions and their rationale"
+    - "Current state"
+  compress:
+    - "Pleasantries and small talk"
+    - "Repeated clarifications"
+    - "Resolved issues (keep resolution only)"
+  preserve:
+    - "User-stated facts and preferences"
+    - "Unresolved questions"
+    - "Commitments someone stated or agreed to"
+
+# Default preservation rules
+preservation_rules:
+  never_compress:
+    - user_stated_requirements
+    - explicit_constraints
+    - final_decisions
+    - error_messages
+    - working_solutions
+
+# Default special handling
+special_handling:
+  - "Maintain chronological coherence"
+  - "Preserve causality relationships"
+  - "Note topic transitions explicitly"
+
+# Default compression rates by density level
+compression_rates:
+  high_density: 0.35    # Preserve 35% of tokens
+  medium_density: 0.25  # Preserve 25% of tokens
+  low_density: 0.10     # Preserve 10% of tokens
+
+# Validation settings
+validation:
+  min_questions: 5
+  max_questions: 10
+  success_threshold: 0.8
+  question_types:
+    - factual_recall
+    - chronological
+    - reasoning
+    - status
+    - contextual
+
+# Additional extraction categories (empty for base)
+additional_extraction_categories: []

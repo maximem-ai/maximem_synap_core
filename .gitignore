@@ -1,0 +1,21 @@
+# Local secrets and state. Never commit these.
+.env
+.env.*
+!.env.example
+originals/
+config/.maca/
+config/memory.generated*.yml
+
+# Python / Node
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+node_modules/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+SPEC.md

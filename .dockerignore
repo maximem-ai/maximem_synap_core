@@ -1,0 +1,10 @@
+# What `docker build` may send to the Docker daemon. The Dockerfile copies only requirements.txt and synap/,
+# so everything else stays out of the build context. That keeps .env (your keys) and originals/ (the text you
+# stored) away from the builder, which matters most with a remote or shared one.
+*
+
+!requirements.txt
+!synap/
+
+**/__pycache__
+**/*.pyc

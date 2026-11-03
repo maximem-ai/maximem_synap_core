@@ -1,0 +1,36 @@
+{
+  "benchmark": "LongMemEval",
+  "dataset_variant": "LongMemEval_S",
+  "questions": 500,
+  "date_run": "2026-11-02",
+  "answer_model": "gemini-3.8-flash",
+  "judge_model": "gpt-4o",
+  "answering_prompt": {
+    "file": "LME_answering_prompt.md",
+    "chunks": "with",
+    "metadata": "off",
+    "current_date_section": true
+  },
+  "judge_prompt": "LongMemEval evaluate_qa.py (per-question-type yes/no prompts), upstream commit 9e0b455f4ef0e2ab8f2e582289761153549043fc",
+  "records_file": "question_records.json",
+  "system": {
+    "name": "Synap Core",
+    "server": "docker compose up, deploy/docker-compose.yml, config/memory.yml as shipped",
+    "sdk": "maximem-synap 0.6.12, keyless local mode",
+    "extraction_model": "gemini-3.1-pro-preview",
+    "extraction_provider": "openai-compatible",
+    "retrieval_mode": "accurate",
+    "retrieval_max_results": 50,
+    "scoping_mode": "equals_customer",
+    "isolation": "one Synap user per question haystack (500 users)"
+  },
+  "scoring": {
+    "correct_when": "judge.judge_raw starts with yes (any case) and the record has no error",
+    "correct": 418,
+    "of": 500,
+    "errored_questions": [
+      "8752c811"
+    ],
+    "error_reason": "retrieval returned nothing on 4 attempts; counted as wrong"
+  }
+}

@@ -1,0 +1,59 @@
+You read one text, a note or a chat transcript, and list the things it talks about (entities) and the facts that connect two of them (relationships). Reply with one JSON object and nothing else: no prose, no code fence.
+
+THE WRITER
+The text was written by [[WRITER_NAME]]. This is the only name you may use for the writer. Copy it letter for letter. The writer is an entity of type person.
+- "I", "me", "my", "mine", "myself" mean the writer, except inside quotation marks. "he", "she", "they" never do.
+- Never write "I", "me", "User" or the writer's real name as an entity name or as the end of a relationship. Always write [[WRITER_NAME]].
+- If the writer gives their own name, put it in the top-level "writer_name" and do not make a second entity for it. Otherwise set "writer_name" to null.
+- A person placed by their relation to the writer gets that relationship with the writer.
+- If the text has no first person, the writer is not an entity and not part of any relationship.
+- In a transcript, lines start with a speaker label. First person in the user's lines is the writer. First person in the assistant's lines is the assistant: do not make it an entity.
+[[IF CUSTOMER_NAME]]
+
+THE WRITER'S ORGANIZATION
+The writer's organization is called [[CUSTOMER_NAME]], an entity of type organization. "we", "us", "our", "ours", "ourselves" mean this organization, not the writer, except inside quotation marks. Always write [[CUSTOMER_NAME]] for it. If the text gives the organization's real name, put it in the top-level "writer_organization" and do not make a second entity for it; otherwise set "writer_organization" to null.
+[[END IF]]
+
+ENTITIES
+An entity is a person, organization, team, location, product, project, technology, event, condition, document, plan, role, or any other named or clearly identifiable thing. Dates, durations and amounts are not entities.
+- "name": the fullest form used in the text. Put every other form of it in "aliases". Write the resolved name, never a pronoun.
+- "entity_type": one lower-case singular noun.
+- "about": a short phrase, a few words.
+- "source_span": a short quote from the text.
+- Each entity appears once. Leave out "aliases" and "properties" when empty.
+[[IF DOMAIN_BLOCK]]
+
+DOMAIN
+[[DOMAIN_BLOCK]]
+[[END IF]]
+[[IF EARLIER_REFERENCES]]
+
+EARLIER REFERENCES
+These pronouns refer to entities already known from the same writer's earlier notes. Each line gives the pronoun, the entity name and its type:
+[[EARLIER_REFERENCES]]
+When the text uses one of these pronouns for that person or thing, include the entity with exactly that name and type. Relate it only by what THIS text says.
+[[END IF]]
+
+RELATIONSHIPS
+A relationship is one fact that connects two entities. Write each fact once.
+- "source_entity" and "target_entity": the name or an alias of an entity you listed. "source_type" and "target_type": their entity types.
+- "relationship_type": upper-case words joined by underscores, read from source to target: the source does, has or is this to the target. Check the direction before you write it.
+- "inverse_type": the same fact read from target to source.
+- "basis": "stated" if the text says it outright, "implied" if you infer it.
+- "confidence": a number from 0 to 1. Use 0.9 to 1.0 only for a fact the text says directly. Use lower values for an inference, and 0.7 or less when you are unsure. Do not list a fact you would rate below 0.5.
+- "evidence": an exact quote from the text that supports the fact, copied word for word. For an implied fact, quote the nearest supporting words.
+- "properties": details that are not entities, such as dose, when, since, on, by, who, quantity. Copy time words as written ("last week") and do not work out dates. Leave it out when empty.
+- Make no relationship from a hope, a question or a guess unless the text presents it as a fact.
+
+If the text has nothing to extract, reply with {"entities": [], "relationships": []}.
+
+Keep every value short so the reply stays compact.
+
+OUTPUT SHAPE
+{"entities": [{"name": "", "entity_type": "", "aliases": [], "about": "", "source_span": "", "properties": {}}],
+ "relationships": [{"source_entity": "", "source_type": "", "target_entity": "", "target_type": "", "relationship_type": "", "inverse_type": "", "basis": "stated", "confidence": 1.0, "evidence": "", "properties": {}}],
+ "writer_name": null}
+[[IF CUSTOMER_NAME]]
+Also add the key "writer_organization" (a string or null) to the top-level object.
+[[END IF]]
+Use these field names exactly.

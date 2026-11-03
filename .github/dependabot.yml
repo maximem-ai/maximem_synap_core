@@ -1,0 +1,58 @@
+# Weekly update pull requests. A maintainer reviews each one like any other pull request (CONTRIBUTING.md).
+#
+# `open-pull-requests-limit: 0` keeps every ecosystem OFF until launch: Dependabot opens no pull request, and the repository
+# stays at zero pull requests. At launch, change each 0 below to the number in the comment beside it.
+# Major versions are ignored for every ecosystem: a new major base image or store image (Python, Redis, Postgres, Neo4j) is
+# a decision for a maintainer who runs the end-to-end suite, not an automatic pull request.
+# - github-actions: the workflows pin each third-party action by commit SHA; Dependabot moves the SHA and the version comment.
+# - docker: the base image in the Dockerfile.
+# - docker-compose: the store images in deploy/docker-compose.yml, each pinned by version and digest.
+# - pip: requirements.txt and e2e/requirements.txt. Major versions are ignored on purpose: a new major version of an engine
+#   dependency (SQLAlchemy 2.1 once crashed the server on import) is a decision for a maintainer, not an automatic pull request.
+#   torch is installed in the Dockerfile with its own pin and is moved by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly, day: monday}
+    open-pull-requests-limit: 0   # 5 at launch
+    groups:
+      actions: {patterns: ["*"]}
+
+  - package-ecosystem: docker
+    directory: /
+    schedule: {interval: weekly, day: monday}
+    open-pull-requests-limit: 0   # 3 at launch
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: docker-compose
+    directory: /deploy
+    schedule: {interval: weekly, day: monday}
+    open-pull-requests-limit: 0   # 5 at launch
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: pip
+    directory: /
+    schedule: {interval: weekly, day: monday}
+    open-pull-requests-limit: 0   # 5 at launch
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      python-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: pip
+    directory: /e2e
+    schedule: {interval: weekly, day: monday}
+    open-pull-requests-limit: 0   # 3 at launch
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      e2e-minor-and-patch:
+        update-types: ["minor", "patch"]
