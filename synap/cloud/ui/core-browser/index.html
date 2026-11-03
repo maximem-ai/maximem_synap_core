@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Synap Core: memory browser</title>
+  <link rel="icon" href="logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <a class="brand" href="#/overview"><img src="logo.svg" alt="" width="28" height="28"><span>Synap Core</span></a>
+      <nav id="nav" aria-label="Memory browser">
+        <a href="#/overview" data-nav="overview"><span data-icon="chart"></span>Overview</a>
+        <a href="#/memories" data-nav="memories"><span data-icon="database"></span>Memories</a>
+        <a href="#/requests" data-nav="requests"><span data-icon="activity"></span>Requests</a>
+        <a href="#/entities" data-nav="entities"><span data-icon="users"></span>Entities</a>
+        <a href="#/config" data-nav="config"><span data-icon="file"></span>Config</a>
+      </nav>
+      <div class="side-foot">
+        <span class="badge" id="ro">Read-only</span>
+        <span class="badge mono-badge" id="mode" hidden></span>
+      </div>
+    </aside>
+    <div class="panel">
+      <header class="topbar"><span class="muted" id="where">Memory browser</span><span class="muted" id="instance"></span></header>
+      <main id="app"><p class="muted">Loading...</p></main>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

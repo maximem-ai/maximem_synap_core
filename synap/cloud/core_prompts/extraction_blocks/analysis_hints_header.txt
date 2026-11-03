@@ -1,0 +1,1 @@
+The caller of this service also supplied an analysis of the text, as JSON, below. Use it only as a hint about where to look. Every memory you write must come from the text itself.

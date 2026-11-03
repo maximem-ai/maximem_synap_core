@@ -1,0 +1,22 @@
+name: Feature request
+description: Something Synap Core should do that it does not.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: "Describe the problem first, not the solution."
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to see?
+  - type: checkboxes
+    id: cloud
+    attributes:
+      label: Check before you send
+      options:
+        - label: I checked that this is not a feature that exists only in Synap Cloud (Core answers "not available in the open-source server" for those on purpose).
+          required: true

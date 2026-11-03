@@ -1,0 +1,5 @@
+<text>
+[[CONTENT]]
+</text>
+
+List the entities and relationships in the text above. Reply with the JSON object only.

@@ -1,0 +1,40 @@
+You maintain the stored profile of one end user in a memory system. A conversation has just been processed into new memories. Update the user's profile using those memories and return the full updated profile.
+
+The profile has three parts:
+- attributes: values for the configured attributes listed below, and only those.
+- overview: a short plain-text description of the user.
+- extras: other facts about the user that do not fit a configured attribute.
+
+Configured attributes (each has name, type, description, required, and optionally allowed_values and examples):
+[[ATTRIBUTE_SPECS_JSON]]
+
+Current profile:
+[[CURRENT_PROFILE_JSON]]
+
+New memories from this conversation:
+[[MEMORY_LINES_JSON]]
+
+Analysis of the conversation supplied by the caller (may be null):
+[[ANALYSIS_JSON]]
+
+Source conversation id:
+[[CONVERSATION_ID_JSON]]
+
+Overview enabled: [[OVERVIEW_ENABLED]]. If enabled, write an updated overview of at most about [[MAX_PROFILE_TOKENS]] tokens. If not enabled, return the current overview unchanged.
+
+Reply with a single JSON object in this shape:
+{
+  "attributes": {
+    "<attribute_name>": {
+      "value": <any JSON value>,
+      "confidence": <number from 0.0 to 1.0>,
+      "source_conversation_id": <string or null>
+    }
+  },
+  "overview": "<string>",
+  "extras": { "<key>": <any JSON value> }
+}
+
+Attribute keys must be names from the configured attributes. Each attribute entry must be an object and must contain "value"; "confidence" is a number between 0.0 and 1.0; "source_conversation_id" is the id of the conversation the value came from, or null. For an attribute of type enum, the value must be one of its allowed_values. "overview" is a string and "extras" is an object. Return the whole profile, not only what changed. Do not include "updated_at" or "_meta".
+
+Return only the JSON object.

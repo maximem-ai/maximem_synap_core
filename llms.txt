@@ -1,0 +1,45 @@
+# Synap Core
+
+> Synap Core is the open-source, self-hosted edition of Maximem Synap's memory engine: a Docker Compose server that gives AI agents long-term memory, with the same API and SDKs as Synap Cloud.
+
+Synap Core extracts memories from what users say, resolves the entities they mention, tracks time, and retrieves context with vector and graph search. It runs on your own machine behind one `docker compose up`, keeps data in Docker volumes, and has no login (it is meant to sit behind your own backend). The Python SDK is `maximem-synap` and the JavaScript SDK is `@maximem/synap-js-sdk`; point them at `SYNAP_BASE_URL=http://127.0.0.1:8000` with no API key. Licensed under Apache 2.0.
+
+## Start here
+
+- [README](https://github.com/maximem-ai/maximem_synap_core/blob/main/README.md): what Synap Core is, three ways to run it, the SDK quickstart, Core vs Cloud, and what leaves your machine
+- [Docker Compose file](https://github.com/maximem-ai/maximem_synap_core/blob/main/deploy/docker-compose.yml): the server and its four stores, API bound to 127.0.0.1:8000
+- [.env.example](https://github.com/maximem-ai/maximem_synap_core/blob/main/.env.example): every setting, including the model provider, model name and optional API token
+- [Starter memory config](https://github.com/maximem-ai/maximem_synap_core/blob/main/config/memory.yml): the YAML that decides what is remembered and how it is shaped
+
+## Set it up with a coding agent
+
+- [Synap Core setup skill](https://github.com/maximem-ai/maximem_synap_core/blob/main/skills/synap-core/SKILL.md): the end-to-end procedure an agent follows to install, start and verify a server
+- [Connect your code to Core](https://github.com/maximem-ai/maximem_synap_core/blob/main/skills/synap-core/reference/sdk-connect.md): SDK settings, the SYNAP_API_KEY trap and SYNAP_AUTO_LISTEN for integrations
+- [Mental model](https://github.com/maximem-ai/maximem_synap_core/blob/main/skills/synap-core/reference/mental-model.md): what runs, where data lives, and what Core does not have
+- [Choosing the scoping mode](https://github.com/maximem-ai/maximem_synap_core/blob/main/skills/synap-core/reference/scoping-mode.md): consumer (equals_customer) or business (strict), final after the first memory
+- [Model setup](https://github.com/maximem-ai/maximem_synap_core/blob/main/skills/synap-core/reference/model-setup.md): choosing a provider and model, and writing .env
+- [Memory config and the MACA plugin](https://github.com/maximem-ai/maximem_synap_core/blob/main/skills/synap-core/reference/config-and-maca.md): writing a config by hand or having Synap Cloud design one
+- [Troubleshooting](https://github.com/maximem-ai/maximem_synap_core/blob/main/skills/synap-core/reference/troubleshooting.md): errors on first start and how to fix them without deleting data
+- [Running in production](https://github.com/maximem-ai/maximem_synap_core/blob/main/skills/synap-core/reference/production.md): token, TLS, backups and updates
+
+## SDKs and integrations
+
+- [Synap SDK repository](https://github.com/maximem-ai/maximem_synap_sdk): Python and JavaScript SDKs, plus packages for LangChain, LlamaIndex, CrewAI, Haystack, Mastra, the Vercel AI SDK and more
+
+## Project
+
+- [Contributing](https://github.com/maximem-ai/maximem_synap_core/blob/main/CONTRIBUTING.md): what pull requests are accepted (the engine under synap/ is mirrored, so open an issue for it), DCO sign-off, and how to run the tests
+- [Security policy](https://github.com/maximem-ai/maximem_synap_core/blob/main/SECURITY.md): how to report a vulnerability privately, and how to run Core safely
+- [Notice](https://github.com/maximem-ai/maximem_synap_core/blob/main/NOTICE): licensing and attribution for third-party components
+
+## Optional
+
+- [Benchmarks](https://github.com/maximem-ai/maximem_synap_core/blob/main/benchmarks/README.md): the published LongMemEval run (83.6%) and how to check or re-run it
+- [Benchmark results](https://github.com/maximem-ai/maximem_synap_core/blob/main/benchmarks/RESULTS.md): the per-category breakdown
+- [Benchmark methodology](https://github.com/maximem-ai/maximem_synap_core/blob/main/benchmarks/METHODOLOGY.md): the exact settings, models and judge prompts
+- [Agent rules, single file](https://github.com/maximem-ai/maximem_synap_core/blob/main/skills/synap-core/AGENTS.md): the setup rules in one file for tools that take only an AGENTS.md
+- [Agent guide for this repository](https://github.com/maximem-ai/maximem_synap_core/blob/main/AGENTS.md): layout, commands and rules for coding agents working in the repo
+- [Business-app config sample](https://github.com/maximem-ai/maximem_synap_core/blob/main/config/samples/business-app.yml): the strict scoping config for business apps
+- [End-to-end tests](https://github.com/maximem-ai/maximem_synap_core/blob/main/e2e/README.md): the 19-check suite that starts its own stack
+- [Code of conduct](https://github.com/maximem-ai/maximem_synap_core/blob/main/CODE_OF_CONDUCT.md): Contributor Covenant 2.1
+- [Evaluation harness](https://github.com/maximem-ai/memory_and_context_eval_harness): the open harness used to reproduce the benchmark numbers

@@ -1,0 +1,17 @@
+Date information
+
+[[IF DCT]]This content was created on [[DCT]], which is a [[WEEKDAY]]. Use this as the reference date when working out what dates and times in the content refer to.[[END IF]][[IF UNDATED]]The date this content was created is not known. Do not assume today's date. Give a date only when the content itself states one; otherwise use null.[[END IF]]
+
+For each memory object you return, also include these keys:
+
+- "event_start": the first day of the event the memory is about, as "YYYY-MM-DD", or null.
+- "event_end": the last day of the event (inclusive), as "YYYY-MM-DD", or null.
+- "event_precision": how precise the event date is. One of "day", "week", "weekend", "month", "season", "year", "range", "approximate", or null.
+- "temporal_category": one of "perpetual" (true with no time limit), "temporal_fact" (true for a limited period), or "episode" (something that happened at a particular time).
+- "valid_from": when the memory starts being true, as an ISO 8601 timestamp such as "2026-03-16T14:00:00Z", or null.
+- "valid_until": when the memory stops being true, as an ISO 8601 timestamp, or null.
+- "temporal_confidence": a number from 0.0 to 1.0 for how sure you are about the date information.
+- "is_episode": true or false.
+- "episode_metadata": null, or an object with the keys "narrative_summary" (string), "start_date" and "end_date" (ISO 8601 timestamps).
+
+Use null for any date or time you cannot determine. Keep the rest of the output format unchanged.

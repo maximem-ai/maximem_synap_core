@@ -1,0 +1,60 @@
+# Synap Core server dependencies.
+#
+# Built from what the shipped files import, not copied from Cloud's list: Cloud's file leaves out
+# several packages the shipped code imports (python-dateutil, rapidfuzz, typer, rich, anthropic) and
+# relies on them arriving as dependencies of something else. `core_sync.py deps` fails if a package
+# the shipped code imports is missing here. Versions are Cloud's, which the engine is tested against.
+#
+# torch is installed first, CPU-only, by the Dockerfile (it saves about 3.5 GB). Not listed here.
+
+# Server
+fastapi>=0.115.0
+starlette>=0.40.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.10.0
+pydantic-settings>=2.0.0
+python-multipart>=0.0.9
+httpx>=0.28.0
+pyyaml>=6.0.0
+python-dateutil>=2.8.2
+msgpack>=1.0.0
+numpy>=1.24.0
+tiktoken>=0.5.0
+Pillow>=10.0.0
+# Document uploads (PDF, Word, Excel, PowerPoint), read by sdk_api/document_extractor.py
+pypdf>=4.0.0
+python-docx>=1.1.0
+openpyxl>=3.1.0
+python-pptx>=1.0.0
+
+# Databases and queues
+# [asyncio] brings greenlet, which sqlalchemy.ext.asyncio needs. SQLAlchemy 2.1 stopped installing it by
+# itself, so the plain name worked until pip resolved to 2.1 and the server crashed on import.
+sqlalchemy[asyncio]>=2.0.40
+asyncpg>=0.30.0
+psycopg2-binary>=2.9.0
+pgvector>=0.2.4
+redis>=5.0.0,<8.0.0
+chromadb>=0.5.0,<2
+neo4j>=5.26,<6
+
+# Models and language
+# The embedding stack is tested together at these versions (sentence-transformers 6.2, transformers 5.22, torch 2.15 in the
+# Dockerfile). Each is held to its tested major version so a rebuild cannot pick up a new major one by itself.
+sentence-transformers>=6.2,<7
+transformers>=5.22,<6
+onnxruntime>=1.17.0
+spacy>=3.7.2,<3.8
+rapidfuzz>=3.0.0
+openai>=1.0.0
+anthropic>=0.30.0
+synap-er==0.4.0   # our own library, on PyPI
+
+# Command line
+typer>=0.12.0
+rich>=13.0.0
+
+# Tracing (optional at run time, imported by tracing.py)
+opentelemetry-api>=1.27.0
+opentelemetry-sdk>=1.27.0
+opentelemetry-exporter-otlp-proto-http>=1.27.0

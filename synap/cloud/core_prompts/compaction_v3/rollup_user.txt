@@ -1,0 +1,3 @@
+The sections below total about [[CURRENT]] tokens. Condense them to about [[TARGET]] tokens in total.
+
+[[SECTIONS]]
