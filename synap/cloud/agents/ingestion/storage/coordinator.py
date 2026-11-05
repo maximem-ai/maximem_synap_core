@@ -137,6 +137,44 @@ class QuestionVectorPersistResult:
 RETRACTION_CLASS_FETCH_LIMIT = 200
 
 
+GRAPH_LIFECYCLE_FLAG = "SYNAP_GRAPH_LIFECYCLE"
+# Same values as graph_lifecycle_rule.REASON_*; kept literal so this module
+# does not import the rule at load time.
+REASON_SUPERSEDED = "superseded"
+REASON_UNSUPPORTED = "unsupported"
+REASON_DELETED = "deleted"
+REASON_UPDATED = "updated"
+
+
+def graph_lifecycle_enabled(scope: Any = None) -> bool:
+    """SYNAP_GRAPH_LIFECYCLE (or its _INSTANCES list): retirements and deletes
+    release the memory's graph support. On in Core (edition.CORE_ENV)."""
+    from synap.cloud.shared.instance_flags import enabled_for
+    return enabled_for(GRAPH_LIFECYCLE_FLAG, getattr(scope, "instance_id", None))
+
+
+async def _invalidate_query_cache(client_id: str) -> None:
+    """Drop the client's cached query results so a retired or deleted
+    statement is not served from the 300 s cache. Best-effort."""
+    if not client_id:
+        return
+    try:
+        from synap.cloud.application.client_api.retrieval_manager import (
+            invalidate_client_query_cache)
+        await invalidate_client_query_cache(client_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("query cache invalidation failed client_id=%s: %s", client_id, e)
+
+
+@dataclass
+class PendingGraphRelease:
+    scope: Any
+    memory_id: str
+    mode: str
+    reason: str
+    superseded_by: Optional[str] = None
+
+
 class StorageCoordinator:
     """
     Coordinates persistence to all storage providers.
@@ -159,6 +197,141 @@ class StorageCoordinator:
         self._vector = vector
         self._embedding = embedding_client
         self._graph_config = graph_config
+        # Built on first use (tests inject a fake through the attribute).
+        self._graph_lifecycle = None
+        # Graph releases owed by retirements of one ingestion, keyed by
+        # ingestion id. KU runs BEFORE the graph write in Stage 4, so the new
+        # memory's edges do not exist yet when a supersession happens and the
+        # rule cannot tell whether the new memory still supports the old edge.
+        # The release therefore waits until Stage 4 calls
+        # `release_pending_graph` right after the graph write.
+        self._pending_graph_releases: Dict[str, List["PendingGraphRelease"]] = {}
+        self._retire_accepts_enqueue: Optional[bool] = None
+
+    # ------------------------------------------------------------------
+    # Graph lifecycle (every path that retires a memory releases its graph
+    # support; see GraphLifecycle)
+    # ------------------------------------------------------------------
+
+    def _lifecycle(self):
+        if self._graph_lifecycle is None and self._graph is not None:
+            from .graph_lifecycle import GraphLifecycle
+            self._graph_lifecycle = GraphLifecycle(self._graph)
+        return self._graph_lifecycle
+
+    async def _retire_and_release(self, **kwargs) -> bool:
+        """`retire_memory_with_audit`, then owe the graph a release of the id.
+
+        Every KU retirement goes through here, so no path can retire a memory
+        in Postgres and leave its graph support behind. The release itself is
+        queued (see `_pending_graph_releases`) and applied after Stage 4's
+        graph write. When the outbox exists, the row is also written in the
+        retirement's own transaction, so a crash before the release is retried
+        by the drain worker.
+        """
+        lifecycle_on = graph_lifecycle_enabled(kwargs.get("scope"))
+        if lifecycle_on and self._retire_accepts_enqueue is None:
+            import inspect
+            try:
+                params = inspect.signature(self._rdbms.retire_memory_with_audit).parameters
+                self._retire_accepts_enqueue = (
+                    "enqueue_graph" in params
+                    or any(p.kind == p.VAR_KEYWORD for p in params.values()))
+            except (TypeError, ValueError):
+                self._retire_accepts_enqueue = False
+        if lifecycle_on and self._retire_accepts_enqueue:
+            kwargs["enqueue_graph"] = True
+        updated = await self._rdbms.retire_memory_with_audit(**kwargs)
+        require_retire = kwargs.get("require_retire", True)
+        if lifecycle_on and (updated or not require_retire):
+            action = kwargs.get("action")
+            superseded_by = kwargs.get("superseded_by")
+            reason = (REASON_SUPERSEDED if action in ("SUPERSEDE", "ENRICH") and superseded_by
+                      else REASON_UNSUPPORTED)
+            self._queue_graph_release(
+                scope=kwargs["scope"],
+                ingestion_id=kwargs.get("ingestion_id"),
+                memory_id=kwargs["memory_id"],
+                mode="retire",
+                reason=reason,
+                superseded_by=superseded_by,
+            )
+        return updated
+
+    def _queue_graph_release(self, *, scope, ingestion_id, memory_id, mode, reason,
+                             superseded_by=None) -> None:
+        if self._graph is None and self._graph_lifecycle is None:
+            return
+        key = str(ingestion_id) if ingestion_id is not None else ""
+        self._pending_graph_releases.setdefault(key, []).append(PendingGraphRelease(
+            scope=scope, memory_id=str(memory_id), mode=mode, reason=reason,
+            superseded_by=str(superseded_by) if superseded_by else None,
+        ))
+
+    def pending_graph_releases(self, ingestion_id: Optional[Any] = None) -> List["PendingGraphRelease"]:
+        key = str(ingestion_id) if ingestion_id is not None else ""
+        return list(self._pending_graph_releases.get(key, []))
+
+    async def release_pending_graph(self, ingestion_id: Optional[Any] = None) -> int:
+        """Apply the graph releases this ingestion's retirements owe.
+
+        Stage 4 calls this right after its graph write, so the T2 rule sees the
+        new memory's edges. Then the outbox rows of the ingestion are drained
+        (marks them done; release is idempotent, so a row whose release already
+        ran changes nothing). A failure leaves the outbox rows pending for the
+        drain worker and, without the outbox, for `graph_reconcile`.
+        Returns the number of memories released.
+        """
+        key = str(ingestion_id) if ingestion_id is not None else ""
+        pending = self._pending_graph_releases.pop(key, [])
+        released = 0
+        clients = set()
+        if pending:
+            lifecycle = self._lifecycle()
+            for item in pending:
+                try:
+                    await lifecycle.release(
+                        item.scope, [item.memory_id], mode=item.mode,
+                        reason=item.reason, superseded_by=item.superseded_by,
+                    )
+                    released += 1
+                    clients.add(str(getattr(item.scope, "client_id", "")))
+                except Exception as e:  # noqa: BLE001 - outbox/reconciler retry it
+                    logger.error(
+                        "Graph release FAILED memory_id=%s mode=%s reason=%s: the "
+                        "graph still lists it as support until the outbox worker "
+                        "or graph_reconcile releases it: %s",
+                        item.memory_id, item.mode, item.reason, e,
+                    )
+        if ingestion_id is not None and pending:
+            try:
+                from .graph_sync_outbox import drain_for_ingestion
+            except ImportError:
+                drain_for_ingestion = None
+            if drain_for_ingestion is not None:
+                try:
+                    await drain_for_ingestion(ingestion_id, graph=self._graph)
+                except Exception as e:  # noqa: BLE001 - the worker retries
+                    logger.warning("Graph outbox drain failed ingestion_id=%s: %s",
+                                   ingestion_id, e)
+        for client_id in clients:
+            await _invalidate_query_cache(client_id)
+        return released
+
+    async def _alive_memories(self, memories: List[ExtractedMemory]) -> List[ExtractedMemory]:
+        """Only the memories whose Postgres row is alive may be attached to the
+        graph. A DLQ replay re-runs Stage 4 for memories a later document may
+        have superseded since; attaching them would put dead ids back on edges.
+        """
+        if not memories:
+            return memories
+        from synap.cloud.shared.memory_liveness import is_alive, load_supporter_rows
+        rows = await load_supporter_rows([m.memory_id for m in memories])
+        kept = [m for m in memories if is_alive(rows.get(str(m.memory_id)))]
+        if len(kept) != len(memories):
+            logger.info("Graph persist: %d memories not alive in Postgres, not attached",
+                        len(memories) - len(kept))
+        return kept
 
     async def persist_rdbms(
         self,
@@ -430,6 +603,24 @@ class StorageCoordinator:
                 logger.info(f"Graph persist: relationship created rel_id={rel_id} source_id={rel.source_entity_id} target_id={rel.target_entity_id} type={rel.relationship_type}")
             else:
                 logger.warning(f"Graph persist: edge creation failed (nodes not found) source_id={rel.source_entity_id} target_id={rel.target_entity_id} type={rel.relationship_type}")
+
+        # Only memories alive in Postgres are attached (a DLQ replay must not
+        # put a since-superseded id back on an edge). `memory_embeddings` is
+        # aligned 1:1 with `memories`, so both are filtered in lockstep. When
+        # the check itself fails, the memories are attached as before: the
+        # read side checks liveness again and graph_reconcile repairs.
+        if memories and graph_lifecycle_enabled(scope):
+            try:
+                alive = await self._alive_memories(memories)
+                if len(alive) != len(memories):
+                    alive_ids = {id(m) for m in alive}
+                    if memory_embeddings is not None and len(memory_embeddings) == len(memories):
+                        memory_embeddings = [
+                            e for m, e in zip(memories, memory_embeddings) if id(m) in alive_ids
+                        ]
+                    memories = alive
+            except Exception as e:  # noqa: BLE001 - never fail ingestion
+                logger.warning(f"Graph persist: liveness check before attach failed (non-fatal): {e}")
 
         # Attach memory content to real relationship edges
         # Uses original_for_memories (extraction-time IDs) for pair lookup
@@ -949,7 +1140,7 @@ class StorageCoordinator:
                 #    retirement, not after it, and never skipped for want of a
                 #    correlation id. The legacy superseded_by column is still
                 #    stamped for anything that reads it.
-                updated = await self._rdbms.retire_memory_with_audit(
+                updated = await self._retire_and_release(
                     memory_id=action.old_memory_id,
                     action="SUPERSEDE",
                     scope=scope,
@@ -1012,6 +1203,11 @@ class StorageCoordinator:
                     action.old_memory_id, action.new_memory_id, e,
                     exc_info=True,
                 )
+
+        # The superseded text was deleted from the vectors above; a cached
+        # bundle may still hold it for up to the cache TTL.
+        if superseded_count > 0:
+            await _invalidate_query_cache(str(getattr(scope, "client_id", "") or ""))
 
         return superseded_count
 
@@ -1157,7 +1353,7 @@ class StorageCoordinator:
                     # Retirement + lineage + trail row in one transaction.
                     # A sibling retired here is as undoable as one retired by
                     # the pair verdict above: same before-state, same rules.
-                    updated = await self._rdbms.retire_memory_with_audit(
+                    updated = await self._retire_and_release(
                         memory_id=mid,
                         action="SUPERSEDE",
                         scope=scope,
@@ -1237,7 +1433,7 @@ class StorageCoordinator:
                 #    `require_retire=False`: an already-deprecated row still
                 #    gets its trail row, matching the existing behaviour of
                 #    falling through to the vector delete below.
-                updated = await self._rdbms.retire_memory_with_audit(
+                updated = await self._retire_and_release(
                     memory_id=action.old_memory_id,
                     action="DELETE",
                     scope=scope,
@@ -1359,7 +1555,7 @@ class StorageCoordinator:
                 # retired. A NULL before-state makes the reversal refuse it,
                 # which is the behaviour we want — this is the one retirement
                 # that must NOT be undoable.
-                await self._rdbms.retire_memory_with_audit(
+                await self._retire_and_release(
                     memory_id=mid,
                     action="NONE",
                     scope=scope,
@@ -1485,7 +1681,7 @@ class StorageCoordinator:
                     # It is the most speculative retirement in the pipeline, so
                     # its before-state is the least optional: retirement and
                     # trail row go together or not at all.
-                    await self._rdbms.retire_memory_with_audit(
+                    await self._retire_and_release(
                         memory_id=mid,
                         action="DELETE",
                         scope=scope,
@@ -1626,7 +1822,7 @@ class StorageCoordinator:
                 # supersession is, so it needs the same before-state. The
                 # DEPRECATES kind matches SUPERSEDE: semantically the
                 # existing memory absorbed the new one.
-                updated = await self._rdbms.retire_memory_with_audit(
+                updated = await self._retire_and_release(
                     memory_id=action.new_memory_id,
                     # "NONE" (a duplicate drop) unless the action says
                     # otherwise. The out-of-order direction guard in knowledge
@@ -2152,7 +2348,7 @@ class StorageCoordinator:
                         # `require_retire=False`: a contributor that is already
                         # superseded still needs its ENRICH row, because the
                         # merge really did absorb it.
-                        await self._rdbms.retire_memory_with_audit(
+                        await self._retire_and_release(
                             memory_id=contrib_id,
                             action="ENRICH",
                             scope=scope,

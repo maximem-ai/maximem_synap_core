@@ -164,6 +164,11 @@ CORE_ENV: Dict[str, str] = {
     "SYNAP_GRAPH_EDGE_MEMORY_IDS": "true",
     "SYNAP_GRAPH_SERVE_RELATIONSHIPS": "true",
     "SYNAP_GRAPH_DROP_LONE_ENTITIES": "true",
+    # Retiring or deleting a memory releases its graph support (edges and
+    # nodes close or go), and accurate mode serves a graph statement only
+    # while a live memory supports it. See agents/ingestion/storage/graph_lifecycle.py.
+    "SYNAP_GRAPH_LIFECYCLE": "true",
+    "SYNAP_GRAPH_SERVE_CHECKS_LIVENESS": "true",
     "SYNAP_WRITER_ENTITY": "true",
     "SYNAP_CUSTOMER_ENTITY": "true",
     "SYNAP_TEMPORAL_KEEP_PERSON": "true",
