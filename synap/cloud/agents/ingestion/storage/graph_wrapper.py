@@ -1084,68 +1084,21 @@ class AsyncGraphWrapper:
         new_confidence: float,
         scope: Scope,
     ) -> int:
-        """Update a memory entry on all relationship edges that reference it.
+        """The memory's text was edited: the graph records extracted from the
+        OLD text no longer have its support.
 
-        Uses versioned entries: marks existing entry as is_current=False,
-        appends a new entry with incremented version and is_current=True.
-        Old entries without version fields are treated as version=1.
+        A thin wrapper over ``GraphLifecycle.release`` (mode ``retire``, reason
+        ``updated``), so it works in references mode (``memory_ids``) and in
+        copies mode (``memory_contents``) alike. It used to rewrite only copies,
+        found nothing in references mode and changed nothing, so a sentence
+        built from the old text kept being served. The new text is searchable
+        through the vector store at once; graph lines are not re-extracted from
+        it here (owner decision 3). Returns how many records were touched.
         """
-        from datetime import datetime, timezone
-
-        namespace = self._get_namespace(scope)
-        edges = await self._find_edges_with_memory(memory_id, scope)
-        updated_count = 0
-
-        for edge_data in edges:
-            edge_id = edge_data["edge_id"]
-            mc_list = edge_data["memory_contents"]
-
-            max_version = 0
-            modified = False
-            superseded_instance = None
-
-            for entry in mc_list:
-                if entry.get("memory_id") == memory_id and entry.get("is_current", True) and not entry.get("is_deleted", False):
-                    # Mark old entry as no longer current
-                    entry["is_current"] = False
-                    current_version = entry.get("version", 1)
-                    max_version = max(max_version, current_version)
-                    superseded_instance = entry.get(graph_boundary.INSTANCE_ID) or superseded_instance
-                    modified = True
-
-            if modified:
-                # Append new versioned entry
-                mc_list.append({
-                    "content": new_content,
-                    "memory_type": new_memory_type,
-                    "memory_id": memory_id,
-                    "confidence": new_confidence,
-                    "version": max_version + 1,
-                    "created_at": mc_list[0].get("created_at") if mc_list else datetime.now(timezone.utc).isoformat(),
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "is_current": True,
-                    "is_deleted": False,
-                    # The same memory, so the same writer: the entry it replaces
-                    # names its instance, else the instance doing this update. An
-                    # entry with none would be refused by every restricted viewer,
-                    # and an updated memory would vanish from the graph arm.
-                    **({graph_boundary.INSTANCE_ID: superseded_instance}
-                       if superseded_instance else graph_boundary.memory_properties(scope)),
-                })
-
-                try:
-                    await asyncio.to_thread(
-                        self._provider.update_edge,
-                        namespace,
-                        edge_id,
-                        {"memory_contents": json.dumps(mc_list)},
-                    )
-                    updated_count += 1
-                except Exception as e:
-                    logger.warning(f"Failed to update memory on edge edge_id={edge_id} memory_id={memory_id} error={e}")
-
-        logger.info(f"Memory updated on relationship edges memory_id={memory_id} edges_found={len(edges)} edges_updated={updated_count}")
-        return updated_count
+        from synap.cloud.agents.ingestion.storage.graph_lifecycle import GraphLifecycle
+        result = await GraphLifecycle(self).release(
+            scope, [str(memory_id)], mode="retire", reason="updated")
+        return result.edges_pruned + result.nodes_pruned + result.legacy_entries_marked
 
     async def soft_delete_memory_from_edges(
         self,
@@ -1153,56 +1106,21 @@ class AsyncGraphWrapper:
         scope: Scope,
         redact: bool = False,
     ) -> int:
-        """Soft-delete a memory entry on all relationship edges that reference it.
+        """The memory was deleted: erase its graph support.
 
-        Marks matching entries as is_deleted=True, is_current=False with a deleted_at timestamp.
-
-        ``redact=True`` (forget by description) also blanks the entry's text and
-        embedding. The mark alone hides the entry from the one reader that checks
-        it, but the text stays in the edge property; a consolidation reversal that
-        restores a before-image would bring it back. Default False, so the existing
-        delete-by-ID path behaves exactly as before.
+        A thin wrapper over ``GraphLifecycle.release`` (mode ``erase``, reason
+        ``deleted``). The id is removed from every relationship and node; a
+        record no live memory supports any more is deleted, with the nodes it
+        leaves orphaned (never the writer's or customer's node). In copies mode
+        the entry is marked ``is_deleted``; ``redact=True`` (forget) also blanks
+        its text and embedding. It used to understand only copies mode, found
+        nothing in references mode and reported success. Graph failures raise.
+        Returns how many records were touched.
         """
-        from datetime import datetime, timezone
-
-        namespace = self._get_namespace(scope)
-        edges = await self._find_edges_with_memory(memory_id, scope)
-        updated_count = 0
-
-        now_iso = datetime.now(timezone.utc).isoformat()
-
-        for edge_data in edges:
-            edge_id = edge_data["edge_id"]
-            mc_list = edge_data["memory_contents"]
-
-            modified = False
-            for entry in mc_list:
-                if entry.get("memory_id") != memory_id:
-                    continue
-                if not entry.get("is_deleted", False):
-                    entry["is_current"] = False
-                    entry["is_deleted"] = True
-                    entry["deleted_at"] = now_iso
-                    modified = True
-                if redact and (entry.get("content") or entry.get("embedding") is not None):
-                    entry["content"] = ""
-                    entry.pop("embedding", None)
-                    modified = True
-
-            if modified:
-                try:
-                    await asyncio.to_thread(
-                        self._provider.update_edge,
-                        namespace,
-                        edge_id,
-                        {"memory_contents": json.dumps(mc_list)},
-                    )
-                    updated_count += 1
-                except Exception as e:
-                    logger.warning(f"Failed to soft-delete memory from edge edge_id={edge_id} memory_id={memory_id} error={e}")
-
-        logger.info(f"Memory soft-deleted from relationship edges memory_id={memory_id} edges_found={len(edges)} edges_updated={updated_count}")
-        return updated_count
+        from synap.cloud.agents.ingestion.storage.graph_lifecycle import GraphLifecycle
+        result = await GraphLifecycle(self).release(
+            scope, [str(memory_id)], mode="erase", reason="deleted", redact=redact)
+        return (result.edges_pruned + result.nodes_pruned + result.legacy_entries_marked)
 
     async def restore_memory_on_edges(
         self,
