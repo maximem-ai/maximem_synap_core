@@ -36,7 +36,7 @@ def test_read_timeout_from_env(monkeypatch, raw, expected):
     assert base_mod.llm_http_timeout().read == expected
 
 
-@pytest.mark.parametrize("raw", ["abc", "-1", "5m"])
+@pytest.mark.parametrize("raw", ["abc", "-1", "5m", "nan", "NaN", "inf", "-inf", "Infinity"])
 def test_bad_value_stops_startup(monkeypatch, raw):
     monkeypatch.setenv("SYNAP_LLM_READ_TIMEOUT_SECONDS", raw)
     with pytest.raises(ValueError, match="SYNAP_LLM_READ_TIMEOUT_SECONDS"):
@@ -238,3 +238,11 @@ def test_invalid_timeout_stops_core_startup():
     assert any("SYNAP_LLM_WRITE_TIMEOUT_SECONDS" in m for m in msgs), msgs
     env["SYNAP_LLM_WRITE_TIMEOUT_SECONDS"] = "none"
     assert not any("TIMEOUT" in str(e) for e in core_startup.problems(env))
+
+
+@pytest.mark.parametrize("raw", ["inf", "nan"])
+def test_non_finite_write_timeout_stops_core_startup(raw):
+    from synap.cloud.shared import core_startup
+    env = {"SYNAP_LLM_PROVIDER": "openai", "SYNAP_LLM_MODEL": "gpt-4o",
+           "SYNAP_LLM_WRITE_TIMEOUT_SECONDS": raw}
+    assert any("SYNAP_LLM_WRITE_TIMEOUT_SECONDS" in str(e) for e in core_startup.problems(env))
