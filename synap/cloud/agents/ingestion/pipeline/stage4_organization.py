@@ -1041,24 +1041,8 @@ class Stage4Organizer:
             graph_relationship_ids = graph_result.relationship_ids
 
         # Graph lifecycle: KU retired memories above, before this document's
-        # graph write existed. Now that it does, release the retired memories'
-        # graph support (the rule can see whether the new memory backs the old
-        # edge). If the graph write failed, the outbox rows stay pending for
-        # the drain worker instead.
-        if hasattr(self._storage, "release_pending_graph"):
-            if isinstance(graph_result, Exception):
-                pending = getattr(self._storage, "_pending_graph_releases", None)
-                if isinstance(pending, dict):
-                    left = pending.pop(str(ingestion_id) if ingestion_id is not None else "", [])
-                    if left:
-                        logger.warning(
-                            "Graph write failed: %d graph releases left to the outbox "
-                            "worker / graph_reconcile", len(left))
-            else:
-                try:
-                    await self._storage.release_pending_graph(ingestion_id)
-                except Exception as e:  # noqa: BLE001 - never fail ingestion
-                    logger.error(f"Graph lifecycle release after graph write failed: {e}")
+        # graph write existed. Now that it does, release their graph support.
+        await self._release_graph_after_write(graph_result, ingestion_id)
 
         vector_ids = []
         if isinstance(vector_result, Exception):
@@ -1161,6 +1145,28 @@ class Stage4Organizer:
             partial_failure=len(failures) > 0,
             failure_details=failures,
         )
+
+    async def _release_graph_after_write(self, graph_result, ingestion_id) -> None:
+        """Apply the graph releases KU queued for this ingestion, now that the
+        document's graph write has finished (the rule can see whether the new
+        memory backs the old edge). If the graph write failed, nothing is
+        applied: the outbox rows stay pending for the drain worker, and
+        graph_reconcile is the backstop."""
+        if not hasattr(self._storage, "release_pending_graph"):
+            return
+        if isinstance(graph_result, Exception):
+            pending = getattr(self._storage, "_pending_graph_releases", None)
+            if isinstance(pending, dict):
+                left = pending.pop(str(ingestion_id) if ingestion_id is not None else "", [])
+                if left:
+                    logger.warning(
+                        "Graph write failed: %d graph releases left to the outbox "
+                        "worker / graph_reconcile", len(left))
+            return
+        try:
+            await self._storage.release_pending_graph(ingestion_id)
+        except Exception as e:  # noqa: BLE001 - never fail ingestion
+            logger.error(f"Graph lifecycle release after graph write failed: {e}")
 
     async def _persist_graph_safe(
         self,
