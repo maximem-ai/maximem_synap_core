@@ -42,6 +42,10 @@ def problems(environ: Optional[Mapping[str, str]] = None) -> List[CoreStartupErr
     except llm_settings.LLMSettingsError as exc:
         found.append(CoreStartupError(str(exc)))
 
+    from synap.cloud.infrastructure.llm.providers.base import timeout_setting_problems
+
+    found.extend(CoreStartupError(m) for m in timeout_setting_problems(env))
+
     provider = (env.get("EMBEDDING_PROVIDER") or "sentence-transformers").strip().lower()
     if provider == "remote":
         found.append(CoreStartupError(

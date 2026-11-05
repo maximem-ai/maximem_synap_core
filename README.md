@@ -86,7 +86,7 @@ SYNAP_LLM_PROVIDER=<openai | anthropic | ollama | openai-compatible>
 SYNAP_LLM_MODEL=<the model name, exactly as your provider names it>
 ```
 
-Synap Core does not pick a model for you. [Model setup →](https://docs.maximem.ai/core/local-models) Then start it:
+Synap Core does not pick a model for you. [Model setup →](https://docs.maximem.ai/core/local-models) Synap waits up to 5 minutes for each model answer, then fails that step and retries it; for a slow model you run yourself, raise `SYNAP_LLM_READ_TIMEOUT_SECONDS` in `.env` (seconds, or `none` for no limit). Then start it:
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d

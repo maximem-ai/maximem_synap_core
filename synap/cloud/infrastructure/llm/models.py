@@ -317,12 +317,36 @@ class LLMError(Exception):
     pass
 
 
+class LLMTimeoutError(LLMError):
+    """A model call failed because the provider did not answer in time.
+
+    Raised by the manager (complete and stream) when an attempt ended in
+    ProviderTimeoutError, so callers that must not carry on without an answer
+    (knowledge-update classification) can tell a timeout from a bad answer and
+    fail their stage, letting the worker's retry and dead-letter queue run.
+    """
+    pass
+
+
 class ProviderError(LLMError):
     """Error from LLM provider."""
     def __init__(self, message: str, provider: str, status_code: Optional[int] = None):
         super().__init__(message)
         self.provider = provider
         self.status_code = status_code
+
+
+class ProviderTimeoutError(ProviderError):
+    """The provider did not answer within the configured time limit.
+
+    Kept apart from ProviderError on purpose: a request that is slow or stuck is
+    not evidence that the model is down, so it must not count toward the error
+    counter that marks a model unavailable (tracker.record_error), nor mark an
+    API key unhealthy. The call still fails, so the caller's retry runs.
+    """
+    def __init__(self, provider: str, phase: str = "read"):
+        super().__init__(f"Request timeout ({phase})", provider, 408)
+        self.phase = phase
 
 
 class RateLimitError(ProviderError):

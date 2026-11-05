@@ -17,9 +17,10 @@ from synap.cloud.infrastructure.llm.models import (
     ModelType,
     RateLimits,
     ProviderError,
+    ProviderTimeoutError,
     RateLimitError
 )
-from .base import BaseLLMProvider
+from .base import BaseLLMProvider, SLOW_ANSWER_TIMEOUTS as _SLOW_ANSWER
 
 # Reasoning-family models (gpt-5, gpt-6, o-series) reject ``max_tokens`` and any
 # ``temperature`` but the default. Verified 2026-10-21 against gpt-6-luna: 400
@@ -207,10 +208,11 @@ class OpenAIProvider(BaseLLMProvider):
 
             data = response.json()
 
-        except httpx.TimeoutException:
-            if self._key_rotator:
-                self._key_rotator.record_failure(api_key, "timeout")
-            raise ProviderError("Request timeout", "openai", 408)
+        except _SLOW_ANSWER as e:
+            # A slow or stuck request says nothing about the key or the model:
+            # do not mark the key unhealthy, and raise the timeout type the
+            # manager keeps out of the availability tracker.
+            raise ProviderTimeoutError("openai", type(e).__name__) from e
         except httpx.RequestError as e:
             if self._key_rotator:
                 self._key_rotator.record_failure(api_key, str(e))
@@ -280,38 +282,42 @@ class OpenAIProvider(BaseLLMProvider):
 
         self._note_request(kwargs, payload)
 
-        async with self._http_client.stream(
-            "POST",
-            f"{self.base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-        ) as response:
-            if response.status_code == 429:
-                raise RateLimitError("openai")
+        try:
+            async with self._http_client.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+            ) as response:
+                if response.status_code == 429:
+                    raise RateLimitError("openai")
 
-            if response.status_code >= 400:
-                error_text = await response.aread()
-                raise ProviderError(error_text.decode(), "openai", response.status_code)
+                if response.status_code >= 400:
+                    error_text = await response.aread()
+                    raise ProviderError(error_text.decode(), "openai", response.status_code)
 
-            async for line in response.aiter_lines():
-                if line.startswith("data: "):
-                    data = line[6:]
-                    if data == "[DONE]":
-                        break
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data = line[6:]
+                        if data == "[DONE]":
+                            break
 
-                    chunk = _json.loads(data)
-                    # Final usage chunk has empty choices — capture and skip
-                    usage = chunk.get("usage")
-                    if usage and _usage_sink is not None:
-                        _usage_sink["input_tokens"] = usage.get("prompt_tokens", 0)
-                        _usage_sink["output_tokens"] = usage.get("completion_tokens", 0)
-                    choices = chunk.get("choices", [])
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta", {})
-                    content = delta.get("content", "")
-                    if content:
-                        yield content
+                        chunk = _json.loads(data)
+                        # Final usage chunk has empty choices — capture and skip
+                        usage = chunk.get("usage")
+                        if usage and _usage_sink is not None:
+                            _usage_sink["input_tokens"] = usage.get("prompt_tokens", 0)
+                            _usage_sink["output_tokens"] = usage.get("completion_tokens", 0)
+                        choices = chunk.get("choices", [])
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            yield content
+        except _SLOW_ANSWER as e:
+            # Not counted toward model availability: see ProviderTimeoutError.
+            raise ProviderTimeoutError("openai", type(e).__name__) from e
 
     def get_available_models(self) -> List[str]:
         return list(self.MODELS.keys())
