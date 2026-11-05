@@ -1479,8 +1479,16 @@ async def delete_memory(
     memory_id: str,
     auth: SDKAuthContext = Depends(get_sdk_auth),
     session: AsyncSession = Depends(get_async_session),
+    customer_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ):
-    """Delete a memory by ID."""
+    """Delete a memory by ID, or a graph record by its graph id.
+
+    ``customer_id`` / ``user_id`` (optional query parameters) say who is
+    deleting. They matter only for a graph id: such a record is erased only
+    from the graph the caller WRITES to, never from a shared customer- or
+    client-level graph it can merely read.
+    """
     try:
         _uuid.UUID(memory_id)
     except ValueError:
@@ -1509,7 +1517,8 @@ async def delete_memory(
         # graph ids. Such an id is not a memory: look it up in the graph and
         # erase that record only (owner decision: the memories behind it are
         # kept and reported, not deleted).
-        answer = await _delete_graph_record(memory_id, auth, client_uuid, session)
+        answer = await _delete_graph_record(memory_id, auth, client_uuid, session,
+                                            customer_id=customer_id, user_id=user_id)
         if answer is not None:
             return answer
         raise HTTPException(
@@ -1771,8 +1780,19 @@ async def _invalidate_query_cache(client_id: str) -> bool:
         return False
 
 
+def _graph_write_namespaces(scope) -> List[str]:
+    """The graph a caller at *scope* writes to: the namespace its own writes
+    land in, by the ingestion writer's rule (`scope_key.write_scope_id`).
+    Never a level above the caller. The pre-ladder (legacy) graph is NOT
+    added for a user: it is the customer's shared graph, and a user cannot be
+    told apart from the customer there."""
+    from synap.cloud.shared import scope_key
+    return [scope_key.write_scope_id(scope)]
+
+
 async def _delete_graph_record(record_id: str, auth: SDKAuthContext, client_uuid: str,
-                               session: AsyncSession) -> Optional[DeleteMemoryResponse]:
+                               session: AsyncSession, *, customer_id: Optional[str] = None,
+                               user_id: Optional[str] = None) -> Optional[DeleteMemoryResponse]:
     """Delete one graph record (edge or entity node) by its graph id.
 
     Looked up only in the namespaces the caller can read (the lifecycle
@@ -1789,12 +1809,23 @@ async def _delete_graph_record(record_id: str, auth: SDKAuthContext, client_uuid
     graph_provider = get_cached_providers().get("graph")
     if not graph_provider:
         return None
-    scope = _scope_of_stored_row(auth, client_uuid,
-                                 SimpleNamespace(customer_id=None, user_id=None))
+    if customer_id or user_id:
+        scope = await _resolve_scope(auth, user_id, customer_id)
+    else:
+        scope = _scope_of_stored_row(auth, client_uuid,
+                                     SimpleNamespace(customer_id=None, user_id=None))
     if not _graph_lifecycle_on(scope):
         return None
     lifecycle = _graph_lifecycle(graph_provider)
-    erased = await lifecycle.erase_record(scope, record_id)
+    # Only where the caller writes: a user must not erase a record of the
+    # customer's or the client's shared graph, which it can only read.
+    import inspect
+    if "namespaces" not in inspect.signature(lifecycle.erase_record).parameters:
+        logger.error("delete by graph id refused: GraphLifecycle.erase_record cannot be limited "
+                     "to the caller's write namespaces")
+        return None
+    erased = await lifecycle.erase_record(scope, record_id,
+                                          namespaces=_graph_write_namespaces(scope))
     if erased is None:
         return None
 
