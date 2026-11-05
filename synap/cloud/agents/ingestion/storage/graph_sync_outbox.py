@@ -52,12 +52,50 @@ async def table_available(session=None) -> bool:
     return ok
 
 
+async def superseded_by_any(session, memory_ids: List[str]) -> Dict[str, List[str]]:
+    """{N: [S, ...]}: the memories each of *memory_ids* had superseded.
+
+    Read from ``memories.superseded_by`` (only correct BEFORE N is deleted: the
+    foreign key clears it) and from the ``SUPERSEDE`` rows of ``memory_actions``
+    (the audit trail, which has no foreign key and survives the delete). Must
+    run in the caller's transaction, before its delete."""
+    from sqlalchemy import text
+    out: Dict[str, List[str]] = {}
+    if not memory_ids:
+        return out
+    params = {"ids": [str(i) for i in memory_ids]}
+    queries = [
+        "SELECT superseded_by AS n, id AS s FROM memories "
+        "WHERE superseded_by = ANY(CAST(:ids AS uuid[]))",
+        "SELECT replaced_by_memory_id AS n, memory_id AS s FROM memory_actions "
+        "WHERE action = 'SUPERSEDE' AND replaced_by_memory_id = ANY(CAST(:ids AS uuid[]))",
+    ]
+    for sql in queries:
+        # No try/except: a failed statement aborts the caller's transaction,
+        # and swallowing it would only move the error to the delete.
+        rows = (await session.execute(text(sql), params)).fetchall()
+        for n, s_id in rows or []:
+            if n is None or s_id is None:
+                continue
+            lst = out.setdefault(str(n), [])
+            if str(s_id) not in lst:
+                lst.append(str(s_id))
+    return out
+
+
 async def enqueue(session, *, memory_ids: Iterable[Any], scope: Any, op: str, reason: str,
                   superseded_by: Optional[Any] = None, redact: bool = False,
-                  ingestion_id: Optional[Any] = None) -> List[str]:
+                  ingestion_id: Optional[Any] = None,
+                  restore_ids: Optional[Dict[str, List[str]]] = None) -> List[str]:
     """Insert one pending row per memory with *session*, WITHOUT committing:
     the caller commits it together with the memory change. Returns the row ids
-    ([] when the table does not exist)."""
+    ([] when the table does not exist).
+
+    For ``op="erase"`` each row also records the memories that memory had
+    superseded (``restore_memory_ids``), so the graph can restore them once
+    the delete clears their ``superseded_by``. *restore_ids* ({N: [S]}) is
+    used when given; otherwise they are read here, so call this BEFORE the
+    delete statement."""
     if op not in OPS:
         raise ValueError(f"op must be one of {OPS}, not {op!r}")
     ids = [str(m) for m in dict.fromkeys(memory_ids or []) if m]
@@ -65,17 +103,30 @@ async def enqueue(session, *, memory_ids: Iterable[Any], scope: Any, op: str, re
         return []
     from sqlalchemy import text
     from synap.cloud.agents.ingestion.storage.graph_lifecycle import release_namespaces
+    from synap.cloud.database import schema_compat
     namespaces = release_namespaces(scope)
+    with_restore = op == "erase" and await schema_compat.has_column(TABLE, "restore_memory_ids", session)
+    if op == "erase" and not with_restore:
+        schema_compat.warn_once(
+            "graph_sync_restore_missing",
+            "graph_sync_pending.restore_memory_ids is missing (core migration 002 not applied): "
+            "deleting a memory does not restore the older memory it replaced in the graph; "
+            "graph_reconcile repairs it.")
+    if with_restore and restore_ids is None:
+        restore_ids = await superseded_by_any(session, ids)
+    restore_ids = restore_ids or {}
     row_ids: List[str] = []
     for mid in ids:
         rid = str(uuid.uuid4())
         await session.execute(
             text(f"""INSERT INTO {TABLE} (
                         id, memory_id, client_id, instance_id, customer_id, user_id, scope_level,
-                        namespaces, op, reason, superseded_by, redact, ingestion_id)
+                        namespaces, op, reason, superseded_by, redact, ingestion_id
+                        {', restore_memory_ids' if with_restore else ''})
                     VALUES (CAST(:id AS uuid), CAST(:memory_id AS uuid), :client_id, :instance_id,
                             :customer_id, :user_id, :scope_level, :namespaces, :op, :reason,
-                            CAST(:superseded_by AS uuid), :redact, CAST(:ingestion_id AS uuid))"""),
+                            CAST(:superseded_by AS uuid), :redact, CAST(:ingestion_id AS uuid)
+                            {', CAST(:restore AS uuid[])' if with_restore else ''})"""),
             {"id": rid, "memory_id": mid,
              "client_id": str(scope.client_id),
              "instance_id": _s(getattr(scope, "instance_id", None)),
@@ -84,7 +135,8 @@ async def enqueue(session, *, memory_ids: Iterable[Any], scope: Any, op: str, re
              "scope_level": getattr(scope, "scope_level", None),
              "namespaces": namespaces, "op": op, "reason": reason,
              "superseded_by": _s(superseded_by), "redact": bool(redact),
-             "ingestion_id": _s(ingestion_id)})
+             "ingestion_id": _s(ingestion_id),
+             "restore": [str(x) for x in restore_ids.get(mid, [])]})
         row_ids.append(rid)
     return row_ids
 
@@ -125,6 +177,9 @@ class PostgresOutboxStore:
             params["ingestion_id"] = str(ingestion_id)
         else:
             where.append("next_attempt_at <= now()")
+        from synap.cloud.database import schema_compat
+        restore_col = ", restore_memory_ids" if await schema_compat.has_column(
+            TABLE, "restore_memory_ids") else ""
         async with self._session() as session:
             rows = (await session.execute(text(f"""
                 UPDATE {TABLE} SET attempts = attempts + 1,
@@ -132,11 +187,16 @@ class PostgresOutboxStore:
                 WHERE id IN (SELECT id FROM {TABLE} WHERE {' AND '.join(where)}
                              ORDER BY created_at LIMIT :limit FOR UPDATE SKIP LOCKED)
                 RETURNING id, memory_id, client_id, instance_id, customer_id, user_id, scope_level,
-                          namespaces, op, reason, superseded_by, redact, ingestion_id, attempts"""),
+                          namespaces, op, reason, superseded_by, redact, ingestion_id, attempts{restore_col}"""),
                 params)).mappings().all()
             await session.commit()
-        return [{k: (str(v) if k in ("id", "memory_id", "superseded_by", "ingestion_id") and v is not None else v)
-                 for k, v in dict(r).items()} for r in rows]
+        out = []
+        for r in rows:
+            d = {k: (str(v) if k in ("id", "memory_id", "superseded_by", "ingestion_id") and v is not None else v)
+                 for k, v in dict(r).items()}
+            d["restore_memory_ids"] = [str(x) for x in (d.get("restore_memory_ids") or [])]
+            out.append(d)
+        return out
 
     async def complete(self, row_ids: List[str]) -> None:
         from sqlalchemy import text
@@ -192,17 +252,19 @@ async def apply_rows(rows: List[Dict[str, Any]], store, lifecycle) -> DrainResul
     groups: Dict[tuple, List[Dict[str, Any]]] = {}
     for r in rows:
         key = (r["op"], r["reason"], r.get("superseded_by"), bool(r.get("redact")),
+               tuple(r.get("restore_memory_ids") or ()),
                tuple(r.get("namespaces") or ()), r["client_id"], r.get("customer_id"), r.get("user_id"),
                r.get("scope_level"))
         groups.setdefault(key, []).append(r)
-    for (op, reason, superseded_by, redact, namespaces, *_), group in groups.items():
+    for (op, reason, superseded_by, redact, restore, namespaces, *_), group in groups.items():
         ids = [r["memory_id"] for r in group]
         row_ids = [r["id"] for r in group]
         try:
             scope = _scope_of(group[0])
             for ns in namespaces:
                 await lifecycle.release_in_namespace(ns, ids, mode=op, reason=reason,
-                                                     superseded_by=superseded_by, redact=redact, scope=scope)
+                                                     superseded_by=superseded_by, redact=redact, scope=scope,
+                                                     restore_ids=list(restore) or None)
             await store.complete(row_ids)
             result.done += len(group)
         except Exception as exc:  # noqa: BLE001 - the row stays pending and is retried

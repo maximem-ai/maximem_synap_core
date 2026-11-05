@@ -182,6 +182,24 @@ class FakeGraph:
     def append_to_node_list(self, namespace, node_id, key, values, cap):
         self._append(self.n(namespace, node_id), key, values, cap)
 
+    def restore_memory_ids(self, namespace, ids, cap=500):
+        ids = [str(i) for i in ids]
+        out = []
+        items = [("edge", eid, e["props"]) for eid, e in self.edges.get(namespace, {}).items()] + \
+                [("node", nid, p) for nid, p in self.nodes.get(namespace, {}).items()]
+        for kind, rid, p in items:
+            back = [i for i in p.get("released_memory_ids") or [] if i in ids]
+            if not back:
+                continue
+            current = list(p.get("memory_ids") or [])
+            merged = current + [i for i in back if i not in current]
+            p["memory_ids"] = merged[len(merged) - cap:] if len(merged) > cap else merged
+            p["released_memory_ids"] = [i for i in p["released_memory_ids"] if i not in ids]
+            out.append({"kind": kind, "id": rid, "memory_ids": list(p["memory_ids"]),
+                        "released_memory_ids": list(p["released_memory_ids"]),
+                        "is_fixed_entity": kind == "node" and _fixed(p), "retired_at": p.get("retired_at")})
+        return out
+
     def list_namespaces(self):
         return sorted(set(self.nodes) | set(self.edges))
 
@@ -194,13 +212,17 @@ class FakeGraph:
             legacy = [m["memory_id"] for m in json.loads(p["memory_contents"])] if p.get("memory_contents") else []
             out.append({"kind": "edge", "id": eid, "memory_ids": list(p.get("memory_ids") or []),
                         "released_memory_ids": list(p.get("released_memory_ids") or []),
-                        "legacy_ids": legacy, "is_fixed_entity": False, "retired_at": p.get("retired_at")})
+                        "legacy_ids": legacy, "is_fixed_entity": False, "retired_at": p.get("retired_at"),
+                        "retired_reason": p.get("retired_reason"),
+                        "retired_by_memory_id": p.get("retired_by_memory_id")})
         for nid, p in self.nodes.get(namespace, {}).items():
             if ids is not None and nid not in ids:
                 continue
             out.append({"kind": "node", "id": nid, "memory_ids": list(p.get("memory_ids") or []),
                         "released_memory_ids": list(p.get("released_memory_ids") or []), "legacy_ids": [],
-                        "is_fixed_entity": _fixed(p), "retired_at": p.get("retired_at")})
+                        "is_fixed_entity": _fixed(p), "retired_at": p.get("retired_at"),
+                        "retired_reason": p.get("retired_reason"),
+                        "retired_by_memory_id": p.get("retired_by_memory_id")})
         return out
 
     def edges_with_memory_contents(self, namespace, ids):
