@@ -259,3 +259,16 @@ def test_fast_mode_never_reaches_the_liveness_check():
     discovery = inspect.getsource(RetrievalManager._neo4j_graph_discovery)
     assert "_GraphLiveness.load(" in discovery
     assert 'and mode == "accurate"' in inspect.getsource(rm)
+
+
+async def test_released_ids_are_loaded_and_keep_a_released_edge_closed(env, monkeypatch):
+    released = _edge("edge-released", "user", "acme", "EMPLOYED_BY", [M_58BE, M_6336],
+                     released_memory_ids=[M_3C1F])
+    result = _graph_result()
+    result.edges.append(released)
+    m = _manager()
+    m.graph = _FakeGraph(result)
+    items = await m._neo4j_graph_discovery(_scope(), ["Acme Corp"], [np.array(VEC, dtype=np.float32)])
+    assert "edge-released" not in _by_id(items)
+    assert "edge-reports-to" in _by_id(items)
+    assert M_3C1F in env[-1]

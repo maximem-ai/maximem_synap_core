@@ -1042,7 +1042,10 @@ class _GraphLiveness:
             return cls(checked=False)
         ids: List[str] = []
         for record in list(nodes) + list(edges):
-            ids.extend(_graph_record_memory_ids(getattr(record, "properties", None)))
+            _p = getattr(record, "properties", None) or {}
+            ids.extend(_graph_record_memory_ids(_p))
+            # Released ids are not support, but their rows decide T2 / T1.
+            ids.extend(str(x) for x in (_p.get("released_memory_ids") or []) if x)
         ids = list(dict.fromkeys(ids))
         if not ids:
             return cls(checked=True)

@@ -238,3 +238,38 @@ def test_alive_predicate():
 def test_duplicate_ids_are_ignored():
     state = graph_record_state(GraphRecord(memory_ids=[M_58BE, M_58BE]), ROWS_4B)
     assert isinstance(state, Open) and state.alive_memory_ids == (M_58BE,)
+
+
+# --- released ids (lead decision 2026-11-05): judged for history, never support ---
+
+def test_t2_closed_record_stays_closed_after_release():
+    # The write side released the superseded id 3c1f; the other supporters stay.
+    state = graph_record_state(
+        GraphRecord(memory_ids=[M_58BE, M_6336], released_memory_ids=[M_3C1F]), ROWS_4B)
+    assert isinstance(state, Closed)
+    assert state.rule == "T2" and state.by_memory == M_0874
+    assert state.valid_to == _d(2026, 10, 26)
+
+
+def test_released_record_reopens_on_new_supporter_said_after_superseder():
+    rows = dict(ROWS_4B)
+    m_new = "11111111-2222-4333-8444-555555555555"
+    rows[m_new] = SupporterRow(id=m_new, document_created_at=_d(2026, 12, 1))
+    state = graph_record_state(
+        GraphRecord(memory_ids=[M_58BE, M_6336, m_new], released_memory_ids=[M_3C1F]), rows)
+    assert isinstance(state, Open)
+    assert set(state.current_memory_ids) == {M_58BE, m_new}
+
+
+def test_released_alive_memory_is_not_support():
+    # An edited memory: released, still alive. It cannot keep the record open.
+    rows = {"m1": SupporterRow(id="m1", document_created_at=_d(2026, 1, 1))}
+    state = graph_record_state(GraphRecord(memory_ids=[], released_memory_ids=["m1"]), rows)
+    assert isinstance(state, Closed) and state.rule == "T1"
+    state = graph_record_state(GraphRecord(memory_ids=["m1"], released_memory_ids=["m1"]), rows)
+    assert isinstance(state, Closed)
+
+
+def test_released_deleted_only_closes_as_deleted():
+    state = graph_record_state(GraphRecord(memory_ids=[], released_memory_ids=["gone"]), {})
+    assert isinstance(state, Closed) and state.reason == REASON_DELETED
