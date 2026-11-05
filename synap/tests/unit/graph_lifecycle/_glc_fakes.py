@@ -175,9 +175,6 @@ class FakeGraph:
         current = list(props.get(key) or [])
         merged = current + [v for v in values if v not in current]
         props[key] = merged[len(merged) - cap:] if len(merged) > cap else merged
-        if key == "memory_ids" and len(merged) > len(current):
-            for k in ("retired_at", "retired_reason", "retired_by_memory_id", "valid_to"):
-                props.pop(k, None)
 
     def append_to_edge_list(self, namespace, edge_id, key, values, cap):
         self._append(self.e(namespace, edge_id), key, values, cap)
@@ -188,15 +185,19 @@ class FakeGraph:
     def list_namespaces(self):
         return sorted(set(self.nodes) | set(self.edges))
 
-    def lifecycle_records(self, namespace):
+    def lifecycle_records(self, namespace, ids=None):
         out = []
         for eid, e in self.edges.get(namespace, {}).items():
+            if ids is not None and eid not in ids:
+                continue
             p = e["props"]
             legacy = [m["memory_id"] for m in json.loads(p["memory_contents"])] if p.get("memory_contents") else []
             out.append({"kind": "edge", "id": eid, "memory_ids": list(p.get("memory_ids") or []),
                         "released_memory_ids": list(p.get("released_memory_ids") or []),
                         "legacy_ids": legacy, "is_fixed_entity": False, "retired_at": p.get("retired_at")})
         for nid, p in self.nodes.get(namespace, {}).items():
+            if ids is not None and nid not in ids:
+                continue
             out.append({"kind": "node", "id": nid, "memory_ids": list(p.get("memory_ids") or []),
                         "released_memory_ids": list(p.get("released_memory_ids") or []), "legacy_ids": [],
                         "is_fixed_entity": _fixed(p), "retired_at": p.get("retired_at")})

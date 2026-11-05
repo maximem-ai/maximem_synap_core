@@ -213,14 +213,6 @@ DETACH DELETE n
 RETURN id, name, entity_type, vector_name, memory_ids
 """ % _FIXED.format(v="n")
 
-# Reopen on append: a memory attached to a retired record supports it again.
-# Only when the append really added an id (a replay of an id already there
-# changes nothing). The caller attaches only memories alive in Postgres.
-_REOPEN = (" , {v}.retired_at = CASE WHEN size(merged) > size(current) THEN null ELSE {v}.retired_at END"
-           " , {v}.retired_reason = CASE WHEN size(merged) > size(current) THEN null ELSE {v}.retired_reason END"
-           " , {v}.retired_by_memory_id = CASE WHEN size(merged) > size(current) THEN null ELSE {v}.retired_by_memory_id END"
-           " , {v}.valid_to = CASE WHEN size(merged) > size(current) THEN null ELSE {v}.valid_to END")
-
 _LIST_NAMESPACES = """
 MATCH (n:SynapNode) WHERE n._namespace IS NOT NULL
 RETURN DISTINCT n._namespace AS ns
@@ -228,7 +220,7 @@ RETURN DISTINCT n._namespace AS ns
 
 _LIFECYCLE_EDGES = """
 MATCH (a:SynapNode {_namespace: $ns})-[r]->(:SynapNode)
-WHERE r._namespace = $ns
+WHERE r._namespace = $ns AND ($ids IS NULL OR r.id IN $ids)
 RETURN r.id AS id, coalesce(r.memory_ids, []) AS memory_ids,
        coalesce(r.released_memory_ids, []) AS released_memory_ids,
        r.memory_contents AS memory_contents, r.retired_at AS retired_at
@@ -236,6 +228,7 @@ RETURN r.id AS id, coalesce(r.memory_ids, []) AS memory_ids,
 
 _LIFECYCLE_NODES = """
 MATCH (n:SynapNode {_namespace: $ns})
+WHERE $ids IS NULL OR n.id IN $ids
 RETURN n.id AS id, coalesce(n.memory_ids, []) AS memory_ids,
        coalesce(n.released_memory_ids, []) AS released_memory_ids,
        %s AS is_fixed_entity, n.retired_at AS retired_at
@@ -675,18 +668,18 @@ class Neo4jAdapter(GraphStoreInterface):
     def append_to_node_list(self, namespace: str, node_id: str, key: str,
                             values: List[str], cap: int) -> None:
         """Add *values* to a list property of one node, in one statement:
-        no duplicates, and only the newest *cap* kept. Appending a NEW id to
-        `memory_ids` reopens a retired record (the caller attaches only
-        memories that are alive)."""
+        no duplicates, and only the newest *cap* kept. A retired record is NOT
+        reopened here: the caller re-evaluates it with the shared rule
+        (GraphLifecycle.reevaluate), which reopens it only when an alive
+        memory supports it."""
         if not _SAFE_IDENTIFIER.match(key):
             raise ValueError(f"Invalid property key: {key!r}")
-        reopen = _REOPEN.format(v="n") if key == "memory_ids" else ""
         self._run_write(f"""
             MATCH (n:SynapNode {{_namespace: $ns, id: $id}})
             WITH n, coalesce(n.{key}, []) AS current
             WITH n, current, current + [v IN $values WHERE NOT v IN current] AS merged
             SET n.{key} = CASE WHEN size(merged) > $cap
-                               THEN merged[size(merged) - $cap..] ELSE merged END{reopen}
+                               THEN merged[size(merged) - $cap..] ELSE merged END
         """, {"ns": namespace, "id": node_id, "values": list(values), "cap": cap})
 
     def delete_node(self, namespace: str, node_id: str) -> None:
@@ -853,18 +846,18 @@ class Neo4jAdapter(GraphStoreInterface):
     def append_to_edge_list(self, namespace: str, edge_id: str, key: str,
                             values: List[str], cap: int) -> None:
         """Add *values* to a list property of one edge, in one statement:
-        no duplicates, and only the newest *cap* kept. Appending a NEW id to
-        `memory_ids` reopens a retired record (the caller attaches only
-        memories that are alive)."""
+        no duplicates, and only the newest *cap* kept. A retired record is NOT
+        reopened here: the caller re-evaluates it with the shared rule
+        (GraphLifecycle.reevaluate), which reopens it only when an alive
+        memory supports it."""
         if not _SAFE_IDENTIFIER.match(key):
             raise ValueError(f"Invalid property key: {key!r}")
-        reopen = _REOPEN.format(v="r") if key == "memory_ids" else ""
         self._run_write(f"""
             MATCH (:SynapNode {{_namespace: $ns}})-[r {{_namespace: $ns, id: $id}}]->()
             WITH r, coalesce(r.{key}, []) AS current
             WITH r, current, current + [v IN $values WHERE NOT v IN current] AS merged
             SET r.{key} = CASE WHEN size(merged) > $cap
-                               THEN merged[size(merged) - $cap..] ELSE merged END{reopen}
+                               THEN merged[size(merged) - $cap..] ELSE merged END
         """, {"ns": namespace, "id": edge_id, "values": list(values), "cap": cap})
 
     def stamp_unstamped(self, namespace: str, kind: str, rows: List[Dict[str, Any]]) -> int:
@@ -1066,13 +1059,14 @@ class Neo4jAdapter(GraphStoreInterface):
         """Every graph namespace that holds a node (for the reconciler)."""
         return [r["ns"] for r in self._run_query(_LIST_NAMESPACES, {})]
 
-    def lifecycle_records(self, namespace: str) -> List[Dict[str, Any]]:
-        """Every edge and node of *namespace* with what the lifecycle reads:
+    def lifecycle_records(self, namespace: str, ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Every edge and node of *namespace* (only those with an id in *ids*
+        when given) with what the lifecycle reads:
         kind, id, memory_ids, released_memory_ids, legacy_ids (the memory ids
         in a copies-mode ``memory_contents``), is_fixed_entity, retired_at."""
         import json as _json
         out: List[Dict[str, Any]] = []
-        for e in self._run_query(_LIFECYCLE_EDGES, {"ns": namespace}):
+        for e in self._run_query(_LIFECYCLE_EDGES, {"ns": namespace, "ids": None if ids is None else [str(i) for i in ids]}):
             legacy: List[str] = []
             if e.get("memory_contents"):
                 try:
@@ -1083,7 +1077,7 @@ class Neo4jAdapter(GraphStoreInterface):
             out.append({"kind": "edge", "id": e["id"], "memory_ids": list(e["memory_ids"]),
                         "released_memory_ids": list(e["released_memory_ids"]), "legacy_ids": legacy,
                         "is_fixed_entity": False, "retired_at": e.get("retired_at")})
-        for n in self._run_query(_LIFECYCLE_NODES, {"ns": namespace}):
+        for n in self._run_query(_LIFECYCLE_NODES, {"ns": namespace, "ids": None if ids is None else [str(i) for i in ids]}):
             out.append({"kind": "node", "id": n["id"], "memory_ids": list(n["memory_ids"]),
                         "released_memory_ids": list(n["released_memory_ids"]), "legacy_ids": [],
                         "is_fixed_entity": bool(n["is_fixed_entity"]), "retired_at": n.get("retired_at")})

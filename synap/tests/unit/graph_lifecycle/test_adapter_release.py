@@ -131,16 +131,23 @@ def test_set_record_states_is_one_unwind_per_kind():
     assert tx.sent[0][1]["rows"][0]["now"], "closed rows get a retirement time"
 
 
-def test_append_of_memory_ids_reopens_but_other_lists_do_not():
+def test_append_never_reopens_by_itself():
+    """Reopening is the rule's call (lead decision): the append only appends."""
     a = Neo4jAdapter.__new__(Neo4jAdapter)
     sent = []
     a._run_write = lambda cypher, params=None: sent.append(cypher)
     a.append_to_edge_list("ns", "e1", "memory_ids", ["m9"], 500)
     a.append_to_node_list("ns", "n1", "memory_ids", ["m9"], 500)
-    a.append_to_edge_list("ns", "e1", "instance_ids", ["i"], 500)
-    assert "retired_at = CASE WHEN size(merged) > size(current)" in sent[0]
-    assert "retired_at = CASE WHEN size(merged) > size(current)" in sent[1]
-    assert "retired_at" not in sent[2]
+    assert all("retired_at" not in c for c in sent)
+
+
+def test_lifecycle_records_can_be_limited_to_ids():
+    a = Neo4jAdapter.__new__(Neo4jAdapter)
+    sent = []
+    a._run_query = lambda cypher, params=None: sent.append(params) or []
+    a.lifecycle_records("ns", ["e1"])
+    assert all(p["ids"] == ["e1"] for p in sent)
+    assert "$ids IS NULL OR" in neo._LIFECYCLE_EDGES and "$ids IS NULL OR" in neo._LIFECYCLE_NODES
 
 
 def test_interface_methods_exist_and_refuse_loudly():

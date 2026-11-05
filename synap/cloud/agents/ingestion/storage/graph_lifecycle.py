@@ -204,6 +204,20 @@ class GraphLifecycle:
             return erased
         return None
 
+    async def reevaluate(self, ns: str, ids: Iterable[str]) -> int:
+        """Re-apply the rule to the RETIRED records among *ids* (edges or
+        nodes of *ns*), after memories were attached to them. This is the only
+        way a retired record reopens: when the rule, reading Postgres, finds an
+        alive memory that supports it. Records that are not retired are left
+        alone. Returns how many states were written."""
+        ids = [str(i) for i in dict.fromkeys(ids or []) if i]
+        if not ids:
+            return 0
+        records = [r for r in await self._call("lifecycle_records", ns, ids) if r.get("retired_at")]
+        if not records:
+            return 0
+        return await self.apply_states(ns, records)
+
     async def list_namespaces(self) -> List[str]:
         return list(await self._call("list_namespaces"))
 
@@ -284,18 +298,12 @@ class GraphLifecycle:
             wanted.update(r.get("released_memory_ids") or [])
         loader = self._load or _default_loader()
         supporters = await loader(sorted(wanted)) if wanted else {}
-        from synap.cloud.agents.ingestion.services.graph_lifecycle_rule import is_alive
         states = []
         for r in records:
-            # A released id still counts for the rule when its memory is no
-            # longer alive: that is how the rule sees the supersession (T2) or
-            # deletion (T1) that released it. A released id whose memory is
-            # alive (an edited memory) is not support any more and is left out.
-            kept = list(r.get("memory_ids") or [])
-            released = list(r.get("released_memory_ids") or [])
-            dead_released = [i for i in released if i not in kept and not is_alive(supporters.get(i))]
-            record = GraphRecord(memory_ids=tuple(kept + dead_released),
-                                 released_memory_ids=tuple(released),
+            # The rule reads memory_ids AND released_memory_ids (lead decision,
+            # CONTRACT_GRAPH.md): both are passed as stored.
+            record = GraphRecord(memory_ids=tuple(r.get("memory_ids") or ()),
+                                 released_memory_ids=tuple(r.get("released_memory_ids") or ()),
                                  is_fixed_entity=bool(r.get("is_fixed_entity")))
             state = graph_record_state(record, supporters)
             if state.is_open:

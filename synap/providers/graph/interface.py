@@ -155,8 +155,8 @@ class GraphStoreInterface(ABC):
         """Every graph namespace that holds a record."""
         raise NotImplementedError(f"{type(self).__name__} cannot list namespaces")
 
-    def lifecycle_records(self, namespace: str) -> List[Dict[str, Any]]:
-        """Every edge and node of *namespace* with its lifecycle properties
+    def lifecycle_records(self, namespace: str, ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Every edge and node of *namespace* (only ids in *ids* when given) with its lifecycle properties
         (kind, id, memory_ids, released_memory_ids, legacy_ids, is_fixed_entity,
         retired_at)."""
         raise NotImplementedError(f"{type(self).__name__} cannot list lifecycle records")

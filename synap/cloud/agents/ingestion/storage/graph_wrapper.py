@@ -422,7 +422,22 @@ class AsyncGraphWrapper:
             await asyncio.to_thread(
                 self._provider.append_to_node_list, namespace, node_id,
                 node_memories.PROPERTY, memory_ids, node_memories.MAX_PER_NODE)
+        await self._reevaluate_retired(scope, namespace, list(references))
         return len(references)
+
+    async def _reevaluate_retired(self, scope: Scope, namespace: str, ids: List[str]) -> None:
+        """A memory was attached to records that may be retired: let the rule
+        decide whether they reopen (GraphLifecycle.reevaluate). Never fails the
+        write: a record left retired here is fixed by the reconciler."""
+        from synap.cloud.agents.ingestion.storage.graph_lifecycle import GraphLifecycle, lifecycle_enabled
+        if not ids or not lifecycle_enabled(getattr(scope, "instance_id", None)):
+            return
+        try:
+            await GraphLifecycle(self).reevaluate(namespace, ids)
+        except NotImplementedError:
+            return
+        except Exception:  # noqa: BLE001
+            logger.warning("graph_lifecycle reevaluate after attach failed namespace=%s", namespace, exc_info=True)
 
     async def attach_memories_to_relationships(
         self,
@@ -474,6 +489,7 @@ class AsyncGraphWrapper:
                     written += 1
                 except Exception:  # noqa: BLE001 - the edge is written; its memory list is extra
                     logger.warning("Could not attach memories to edge %s", edge_id, exc_info=True)
+            await self._reevaluate_retired(scope, namespace, list(edge_ids))
             return written
 
         # Build memory_id → embedding lookup for per-memory scoring at retrieval time
