@@ -84,10 +84,37 @@ async def test_no_ids_does_nothing():
     assert res.deleted_ids == [] and s.statements == []
 
 
-async def test_the_mark_is_committed_before_vectors_graph_and_caches_are_touched():
+async def test_the_mark_is_committed_before_vectors_graph_and_caches_are_touched(monkeypatch):
+    """Core runs the graph lifecycle: the graph's outbox row is written in the
+    mark's transaction (before the commit), then the graph step goes through
+    the lifecycle service (erase with redact) and its row is marked done."""
+    from synap.cloud.application.memory_forget import soft_delete
+
+    monkeypatch.setenv("SYNAP_GRAPH_LIFECYCLE", "true")
     events = []
     s = FakeSession(events=events)
     rec = Recorder(events)
+    outbox = []
+
+    async def enqueue_graph(session, **kw):
+        assert session is s                               # the mark's own session
+        events.append("outbox")
+        outbox.append(kw)
+        return ["row-1"]
+
+    async def complete_graph_rows(row_ids):
+        events.append("outbox done")
+
+    class Lifecycle:
+        async def release(self, scope, memory_ids, *, mode, reason, superseded_by=None,
+                          redact=False):
+            events.append("graph")
+            rec.calls.append(list(memory_ids))
+            rec.mode, rec.redact = mode, redact
+
+    monkeypatch.setattr(soft_delete, "enqueue_graph", enqueue_graph)
+    monkeypatch.setattr(soft_delete, "complete_graph_rows", complete_graph_rows)
+    monkeypatch.setattr(soft_delete, "lifecycle_for", lambda graph, vector=None: Lifecycle())
 
     async def invalidate():
         events.append("cache")
@@ -95,10 +122,12 @@ async def test_the_mark_is_committed_before_vectors_graph_and_caches_are_touched
     ids = [str(uuid.uuid4())]
     res = await soft_delete_memories(s, scope=_scope(), memory_ids=ids, reason="r",
                                      vector=rec, graph=rec, invalidate=invalidate)
-    assert events == ["update", "commit", "vectors", "graph", "cache"]
+    assert events == ["update", "outbox", "commit", "vectors", "graph", "outbox done", "cache"]
     assert res.deleted_ids == ids and res.still_present_in == []
-    assert rec.calls[0] == ids
+    assert rec.calls[0] == ids                             # vectors
+    assert rec.calls[1] == ids and rec.mode == "erase"     # graph
     assert rec.redact is True                              # the edge text is blanked too
+    assert (outbox[0]["memory_ids"], outbox[0]["op"], outbox[0]["redact"]) == (ids, "erase", True)
     assert res.contents == {ids[0]: f"text of {ids[0]}"}
 
 

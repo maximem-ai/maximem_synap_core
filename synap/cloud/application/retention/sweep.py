@@ -323,12 +323,19 @@ def _real_deps() -> Deps:
                                cand.memory_id, type(exc).__name__)
         if "graph" in item.stores:
             try:
-                await providers["graph"].soft_delete_memory_from_edges(
-                    memory_id=cand.memory_id, scope=scope)
+                if sdk_memories._graph_lifecycle_on(scope):
+                    await sdk_memories._graph_lifecycle(providers["graph"]).release(
+                        scope, [cand.memory_id], mode="erase", reason="deleted")
+                else:
+                    await providers["graph"].soft_delete_memory_from_edges(
+                        memory_id=cand.memory_id, scope=scope)
             except Exception as exc:  # noqa: BLE001
                 left.append("graph")
                 logger.warning("retention_graph_retry_failed memory_id=%s error=%s",
                                cand.memory_id, type(exc).__name__)
+        # A store was just cleaned: drop cached bundles that may still hold it.
+        if len(left) < len(item.stores):
+            await sdk_memories._invalidate_query_cache(cand.client_id)
         return left
 
     return Deps(list_instances=list_instances, get_config=get_config,

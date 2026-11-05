@@ -182,6 +182,30 @@ class DeleteMemoryResponse(BaseModel):
     # extracted from the same document. False means either the source was
     # purged with the memory, or there was no source to purge.
     source_text_kept: bool = False
+    # What the id named: "memory" (a saved memory), or a graph record served by
+    # accurate mode: "relationship" (an edge, "the user works at Acme Corp") or
+    # "entity" (a node). Defaulted so an SDK that does not know it is unaffected.
+    kind: Literal["memory", "relationship", "entity"] = "memory"
+    # For a graph record: the live memories that still say what the record said.
+    # Deleting the record removes the graph line only; these memories are kept
+    # and are still served (fast mode serves them directly). Delete them by id to
+    # remove the fact everywhere. Empty for a memory.
+    still_asserted_by: List[str] = Field(default_factory=list)
+    # What the graph step changed. None when no graph step ran (no graph
+    # configured, or the graph lifecycle is off). Counts are of records.
+    graph_released: Optional["GraphReleased"] = None
+
+
+class GraphReleased(BaseModel):
+    edges_pruned: int = 0
+    edges_retired: int = 0
+    edges_deleted: int = 0
+    nodes_pruned: int = 0
+    nodes_retired: int = 0
+    nodes_deleted: int = 0
+
+
+DeleteMemoryResponse.model_rebuild()
 
 
 # ---------------------------------------------------------------------------
@@ -1352,6 +1376,14 @@ async def update_memory(
         params,
     )
 
+    # The old graph support is owed a release (reason "updated"): its outbox
+    # row goes in the same transaction as the new text, then commit, so the
+    # graph step runs only on a committed edit and a failed one is retried.
+    graph_rows = await _enqueue_graph(
+        session, _scope_of_stored_row(auth, client_uuid, existing_row), [memory_id],
+        op="retire", reason="updated")
+    await session.commit()
+
     # Vector re-embedding and graph update, from the row's OWN ids.
     #
     # The same defect the delete path had, and quieter. `_resolve_scope` maps
@@ -1396,7 +1428,16 @@ async def update_memory(
 
     try:
         graph_provider = providers.get("graph")  # Already AsyncGraphWrapper
-        if graph_provider:
+        if graph_provider and _graph_lifecycle_on(scope):
+            # The graph lines were extracted from the OLD text, so they no
+            # longer have this memory's support: retire it (owner decision 3:
+            # close the old lines now; re-extracting from the new text is a
+            # later, flagged step). The new text is served through the vector
+            # index at once.
+            await _graph_lifecycle(graph_provider).release(
+                scope, [memory_id], mode="retire", reason="updated")
+            await _complete_graph_rows(graph_rows)
+        elif graph_provider:
             await graph_provider.update_memory_on_edges(
                 memory_id=memory_id,
                 new_content=content_text,
@@ -1406,6 +1447,9 @@ async def update_memory(
             )
     except Exception as e:
         logger.warning("Graph update failed for memory %s (non-fatal): %s", memory_id, e)
+
+    # Cached bundles still hold the old text.
+    await _invalidate_query_cache(client_uuid)
 
     # Record the UPDATE in memory_actions so the Requests page can render a diff.
     # existing_row.content was captured before the UPDATE above ran, so
@@ -1435,8 +1479,20 @@ async def delete_memory(
     memory_id: str,
     auth: SDKAuthContext = Depends(get_sdk_auth),
     session: AsyncSession = Depends(get_async_session),
+    customer_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ):
-    """Delete a memory by ID."""
+    """Delete a memory by ID, or a graph record by its graph id.
+
+    ``customer_id`` / ``user_id`` (optional query parameters) say who is
+    deleting. They matter only for a graph id: such a record is erased only
+    from the graph the caller WRITES to, never from a shared customer- or
+    client-level graph it can merely read.
+    """
+    # The B2C single-identifier contract, as every other route that accepts a
+    # customer_id applies it (shared.b2c_contract).
+    await _b2c_check(auth, customer_id, where="DELETE /api/v1/memories/{memory_id}",
+                     user_id=user_id)
     try:
         _uuid.UUID(memory_id)
     except ValueError:
@@ -1461,6 +1517,14 @@ async def delete_memory(
     )
     existing_row = check.fetchone()
     if not existing_row:
+        # Accurate mode serves graph records (edges and entity nodes) with their
+        # graph ids. Such an id is not a memory: look it up in the graph and
+        # erase that record only (owner decision: the memories behind it are
+        # kept and reported, not deleted).
+        answer = await _delete_graph_record(memory_id, auth, client_uuid, session,
+                                            customer_id=customer_id, user_id=user_id)
+        if answer is not None:
+            return answer
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Memory not found",
@@ -1483,6 +1547,17 @@ async def delete_memory(
         logger.warning("deletion propagation failed memory_id=%s (non-fatal): %s",
                        memory_id, e)
 
+    # Deleting a newer fact restores the older fact it replaced (owner
+    # decision): the foreign key clears `superseded_by` on every memory this one
+    # superseded. Read which ones NOW, in this transaction, before the delete
+    # erases the evidence; the graph puts them back on the records that
+    # released them (GraphLifecycle.release(restore_ids=...)).
+    scope_for_graph = _scope_of_stored_row(auth, client_uuid, existing_row)
+    restore_map: Dict[str, List[str]] = {}
+    if _graph_lifecycle_on(scope_for_graph):
+        from synap.cloud.agents.ingestion.storage.graph_sync_outbox import superseded_by_any
+        restore_map = await superseded_by_any(session, [memory_id])
+
     # Clean up related data before deleting the memory
     await session.execute(
         text("DELETE FROM memory_entity_links WHERE memory_id = CAST(:memory_id AS uuid)"),
@@ -1496,6 +1571,14 @@ async def delete_memory(
         """),
         {"memory_id": memory_id, "client_id": client_uuid},
     )
+    # The graph erase is owed from this moment: its outbox row is written in
+    # the same transaction as the delete, so a failed or interrupted graph step
+    # is retried by the drain worker. Then commit before touching other
+    # stores: the graph erase cannot be undone, and a Postgres rollback after
+    # it would leave a live memory whose graph support is gone.
+    graph_rows = await _enqueue_graph(session, scope_for_graph, [memory_id],
+                                      op="erase", reason="deleted", restore_ids=restore_map)
+    await session.commit()
 
     # Vector and graph cleanup, from the row's OWN ids.
     #
@@ -1605,19 +1688,37 @@ async def delete_memory(
                 memory_id, source_doc, e,
             )
 
-    try:
-        graph_provider = providers.get("graph")  # Already AsyncGraphWrapper
-        if graph_provider:
-            await graph_provider.soft_delete_memory_from_edges(
-                memory_id=memory_id,
-                scope=scope,
+    # Graph: erase this memory's support. Edges and nodes it alone supported
+    # are deleted (an edge's sentence and embedding are a copy of the fact);
+    # records other live memories support only lose the id. The old helper
+    # (`soft_delete_memory_from_edges`) only understood copied text and found
+    # nothing in id mode, and the route then reported fully_removed=True.
+    graph_released: Optional[GraphReleased] = None
+    graph_provider = providers.get("graph")  # Already AsyncGraphWrapper
+    if graph_provider:
+        try:
+            if _graph_lifecycle_on(scope):
+                result = await _graph_lifecycle(graph_provider).release(
+                    scope, [memory_id], mode="erase", reason="deleted",
+                    restore_ids=restore_map.get(str(memory_id)))
+                graph_released = _graph_released(result)
+                await _complete_graph_rows(graph_rows)
+            else:
+                await graph_provider.soft_delete_memory_from_edges(
+                    memory_id=memory_id,
+                    scope=scope,
+                )
+        except Exception as e:
+            still_present_in.append("graph")
+            logger.error(
+                "Graph cleanup FAILED for memory %s: the row is deleted but its "
+                "edges remain until the graph outbox worker retries (pending rows: %d): %s",
+                memory_id, len(graph_rows), e,
             )
-    except Exception as e:
-        still_present_in.append("graph")
-        logger.error(
-            "Graph cleanup FAILED for memory %s: the row is deleted but its "
-            "edges remain: %s", memory_id, e,
-        )
+
+    # A cached bundle may still hold the deleted text for up to the cache TTL.
+    if not await _invalidate_query_cache(client_uuid):
+        still_present_in.append("cache")
 
     return DeleteMemoryResponse(
         memory_id=memory_id,
@@ -1625,4 +1726,155 @@ async def delete_memory(
         fully_removed=not still_present_in,
         still_present_in=still_present_in,
         source_text_kept=source_still_held,
+        kind="memory",
+        graph_released=graph_released,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Graph lifecycle helpers (delete, update, delete by graph id)
+# ---------------------------------------------------------------------------
+
+def _graph_lifecycle_on(scope) -> bool:
+    from synap.cloud.agents.ingestion.storage.coordinator import graph_lifecycle_enabled
+    return graph_lifecycle_enabled(scope)
+
+
+def _graph_lifecycle(graph_provider):
+    """The graph lifecycle service over the cached graph wrapper. A module
+    function so tests can replace it with a fake."""
+    from synap.cloud.agents.ingestion.storage.graph_lifecycle import GraphLifecycle
+    from synap.cloud.application.shared.providers import get_cached_providers
+    # The vector store too: erasing an edge or node also deletes its triple
+    # and entity vectors (a copy of the fact).
+    return GraphLifecycle(graph_provider, vector=get_cached_providers().get("vector"))
+
+
+async def _enqueue_graph(session, scope, memory_ids, *, op: str, reason: str,
+                         restore_ids: Optional[Dict[str, List[str]]] = None) -> List[str]:
+    """Write the graph outbox rows for *memory_ids* with *session*, without
+    committing (the caller commits them with its memory change). Every caller
+    here applies the rows itself after the commit, so they are written leased
+    to it (``inline=True``) and the drain worker leaves them alone unless that
+    step fails. [] when the
+    lifecycle is off or the outbox table does not exist (graph_reconcile is
+    then the backstop)."""
+    if not _graph_lifecycle_on(scope):
+        return []
+    from synap.cloud.agents.ingestion.storage import graph_sync_outbox
+    return await graph_sync_outbox.enqueue(session, memory_ids=memory_ids, scope=scope,
+                                           op=op, reason=reason, restore_ids=restore_ids,
+                                           inline=True)
+
+
+async def _complete_graph_rows(row_ids: List[str]) -> None:
+    """Mark outbox rows done after the inline graph step succeeded. A failure
+    here only means the worker applies the (idempotent) release again."""
+    if not row_ids:
+        return
+    try:
+        from synap.cloud.agents.ingestion.storage.graph_sync_outbox import PostgresOutboxStore
+        await PostgresOutboxStore().complete(list(row_ids))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("graph outbox rows not marked done (the worker re-applies them): %s", e)
+
+
+def _graph_released(result) -> Optional[GraphReleased]:
+    if result is None:
+        return None
+    return GraphReleased(**{
+        f: int(getattr(result, f, 0) or 0) for f in GraphReleased.model_fields
+    })
+
+
+async def _invalidate_query_cache(client_id: str) -> bool:
+    """Drop the client's cached query results. False when that failed."""
+    try:
+        from synap.cloud.application.client_api.retrieval_manager import (
+            invalidate_client_query_cache)
+        await invalidate_client_query_cache(str(client_id))
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.error("query cache invalidation FAILED client_id=%s: a cached bundle "
+                     "may serve the deleted text until its TTL: %s", client_id, e)
+        return False
+
+
+def _graph_write_namespaces(scope) -> List[str]:
+    """The graph a caller at *scope* writes to: the namespace its own writes
+    land in, by the ingestion writer's rule (`scope_key.write_scope_id`).
+    Never a level above the caller. The pre-ladder (legacy) graph is NOT
+    added for a user: it is the customer's shared graph, and a user cannot be
+    told apart from the customer there."""
+    from synap.cloud.shared import scope_key
+    return [scope_key.write_scope_id(scope)]
+
+
+async def _delete_graph_record(record_id: str, auth: SDKAuthContext, client_uuid: str,
+                               session: AsyncSession, *, customer_id: Optional[str] = None,
+                               user_id: Optional[str] = None) -> Optional[DeleteMemoryResponse]:
+    """Delete one graph record (edge or entity node) by its graph id.
+
+    Looked up only in the namespaces the caller can read (the lifecycle
+    service resolves them from the scope). Erases that record only; the
+    memories that backed it are left alone and the live ones are returned in
+    `still_asserted_by`, so the caller can delete them too. `fully_removed` is
+    true only when no live memory still asserts it. None when the id is not a
+    graph record either (the caller answers 404).
+    """
+    from types import SimpleNamespace
+
+    from synap.cloud.application.shared.providers import get_cached_providers
+
+    graph_provider = get_cached_providers().get("graph")
+    if not graph_provider:
+        return None
+    if customer_id or user_id:
+        scope = await _resolve_scope(auth, user_id, customer_id)
+    else:
+        scope = _scope_of_stored_row(auth, client_uuid,
+                                     SimpleNamespace(customer_id=None, user_id=None))
+    if not _graph_lifecycle_on(scope):
+        return None
+    lifecycle = _graph_lifecycle(graph_provider)
+    # Only where the caller writes: a user must not erase a record of the
+    # customer's or the client's shared graph, which it can only read.
+    import inspect
+    if "namespaces" not in inspect.signature(lifecycle.erase_record).parameters:
+        logger.error("delete by graph id refused: GraphLifecycle.erase_record cannot be limited "
+                     "to the caller's write namespaces")
+        return None
+    erased = await lifecycle.erase_record(scope, record_id,
+                                          namespaces=_graph_write_namespaces(scope))
+    if erased is None:
+        return None
+
+    backing = [str(m) for m in (getattr(erased, "memory_ids", None) or [])]
+    still_asserted_by: List[str] = []
+    still_present_in: List[str] = []
+    if backing:
+        try:
+            from synap.cloud.shared.memory_liveness import is_alive, load_supporter_rows
+            rows = await load_supporter_rows(backing, session=session)
+            still_asserted_by = [m for m in backing if is_alive(rows.get(m))]
+        except Exception as e:  # noqa: BLE001
+            # Unknown is not "none": report every backing id rather than
+            # telling the caller nothing still says it.
+            logger.error("liveness check FAILED for graph record %s: %s", record_id, e)
+            still_asserted_by = backing
+    if not await _invalidate_query_cache(client_uuid):
+        still_present_in.append("cache")
+    logger.info("delete_graph_record id=%s kind=%s backing=%d still_asserted_by=%d",
+                record_id, getattr(erased, "kind", "?"), len(backing), len(still_asserted_by))
+    return DeleteMemoryResponse(
+        memory_id=record_id,
+        deleted_at=datetime.now(timezone.utc),
+        kind=getattr(erased, "kind", "relationship"),
+        still_asserted_by=still_asserted_by,
+        still_present_in=still_present_in,
+        fully_removed=not still_asserted_by and not still_present_in,
+        graph_released=GraphReleased(
+            edges_deleted=int(getattr(erased, "edges_deleted", 0) or 0),
+            nodes_deleted=int(getattr(erased, "nodes_deleted", 0) or 0),
+        ),
     )

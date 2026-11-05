@@ -133,6 +133,14 @@ class ContextItem:
     # `rank_score` live and lost it within the 300s TTL. None until ranked.
     rank_score: Optional[float] = None
 
+    # Graph items only (source "neo4j"): what kind of graph record this is
+    # ("entity" | "relationship" | "memory") and the ids of the alive memories
+    # that back it, so a caller can delete the memories behind a statement.
+    # None for every non-graph item, and backing_memory_ids None when the
+    # liveness check did not run (SYNAP_GRAPH_SERVE_CHECKS_LIVENESS off).
+    graph_kind: Optional[str] = None
+    backing_memory_ids: Optional[List[str]] = None
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "item_id": self.item_id,
@@ -183,6 +191,8 @@ class ContextItem:
             # decided from it.
             "matched_queries": list(self.matched_queries),
             "rank_score": self.rank_score,
+            "graph_kind": self.graph_kind,
+            "backing_memory_ids": list(self.backing_memory_ids) if self.backing_memory_ids is not None else None,
         }
 
     @classmethod
@@ -219,6 +229,8 @@ class ContextItem:
             subject_label=data.get("subject_label"),
             matched_queries=list(data.get("matched_queries") or []),
             rank_score=data.get("rank_score"),
+            graph_kind=data.get("graph_kind"),
+            backing_memory_ids=data.get("backing_memory_ids"),
         )
 
 

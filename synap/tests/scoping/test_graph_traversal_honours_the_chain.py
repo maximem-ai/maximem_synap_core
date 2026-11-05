@@ -447,3 +447,17 @@ async def test_a_flag_that_came_back_as_a_string_still_reads_correctly():
     ids = _ids(items)
     assert "m-live" in ids, "the string \"False\" was read as deleted"
     assert "m-gone" not in ids
+
+
+@pytest.fixture(autouse=True)
+def _every_referenced_memory_is_alive(monkeypatch):
+    """The graph arm asks Postgres whether each memory on a record is alive
+    (SYNAP_GRAPH_SERVE_CHECKS_LIVENESS, forced on in Core). These tests are
+    about the scope gate, so every memory they reference is alive."""
+    from synap.cloud.agents.ingestion.services.graph_lifecycle_rule import SupporterRow
+    from synap.cloud.shared import memory_liveness
+
+    async def _alive(ids, session=None):
+        return {str(i): SupporterRow(id=str(i)) for i in ids}
+
+    monkeypatch.setattr(memory_liveness, "load_supporter_rows", _alive)

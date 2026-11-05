@@ -41,6 +41,36 @@ class SoftDeleteResult:
     still_present_in: List[str] = field(default_factory=list)
 
 
+def graph_lifecycle_on(scope) -> bool:
+    from synap.cloud.agents.ingestion.storage.coordinator import graph_lifecycle_enabled
+    return graph_lifecycle_enabled(scope)
+
+
+def lifecycle_for(graph, vector=None):
+    """The graph lifecycle service over *graph* (tests replace this). With
+    *vector*, erased records' triple and entity vectors are deleted too."""
+    from synap.cloud.agents.ingestion.storage.graph_lifecycle import GraphLifecycle
+    return GraphLifecycle(graph, vector=vector)
+
+
+async def enqueue_graph(session, **kwargs) -> List[str]:
+    """Graph outbox rows, written with *session* and not committed."""
+    from synap.cloud.agents.ingestion.storage import graph_sync_outbox
+    return await graph_sync_outbox.enqueue(session, **kwargs)
+
+
+async def complete_graph_rows(row_ids: List[str]) -> None:
+    """Mark outbox rows done after the inline graph step; on failure the
+    worker re-applies the (idempotent) release."""
+    if not row_ids:
+        return
+    try:
+        from synap.cloud.agents.ingestion.storage.graph_sync_outbox import PostgresOutboxStore
+        await PostgresOutboxStore().complete(list(row_ids))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("forget_graph_outbox_not_marked_done: %s", exc)
+
+
 async def soft_delete_memories(
     session,
     *,
@@ -87,9 +117,16 @@ async def soft_delete_memories(
     if not marked:
         return result
 
-    # Commit the mark before touching other stores, so a reader that races the
-    # cache clear below re-reads a row that is already hidden and not one that
-    # is about to be.
+    # The graph erase is owed from this moment: its outbox rows go in the same
+    # transaction as the mark, so a failed graph step is retried by the drain
+    # worker. Commit the mark before touching other stores, so a reader that
+    # races the cache clear below re-reads a row that is already hidden and
+    # not one that is about to be.
+    graph_rows: List[str] = []
+    if graph is not None and graph_lifecycle_on(scope):
+        graph_rows = await enqueue_graph(session, memory_ids=marked, scope=scope,
+                                         op="erase", reason="deleted", redact=True,
+                                         inline=True)
     await session.commit()
 
     if vector is not None:
@@ -102,9 +139,18 @@ async def soft_delete_memories(
 
     if graph is not None:
         try:
-            for mid in marked:
-                await graph.soft_delete_memory_from_edges(memory_id=mid, scope=scope,
-                                                          redact=True)
+            if graph_lifecycle_on(scope):
+                # Erase with redact: edges and nodes only these memories
+                # supported are deleted (their sentence and embedding are a
+                # copy of the fact); copied-text entries are blanked. The old
+                # helper found nothing in id mode and changed nothing.
+                await lifecycle_for(graph, vector).release(
+                    scope, marked, mode="erase", reason="deleted", redact=True)
+                await complete_graph_rows(graph_rows)
+            else:
+                for mid in marked:
+                    await graph.soft_delete_memory_from_edges(memory_id=mid, scope=scope,
+                                                              redact=True)
         except Exception as exc:  # noqa: BLE001
             result.still_present_in.append("graph")
             logger.error("forget_graph_cleanup_failed: the rows are marked but their "

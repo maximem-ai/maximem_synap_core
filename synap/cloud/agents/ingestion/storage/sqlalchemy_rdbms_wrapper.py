@@ -752,8 +752,14 @@ class SQLAlchemyRDBMSWrapper:
         link_kind: str = "DEPRECATES",
         link_to_memory_id: Optional[str] = None,
         require_retire: bool = True,
+        enqueue_graph: bool = False,
     ) -> bool:
         """Retire one memory and write its trail row in a single transaction.
+
+        ``enqueue_graph=True`` also writes a ``graph_sync_pending`` row (the
+        graph release, storage/graph_sync_outbox.py) in the SAME transaction, so
+        the graph cannot miss a committed retirement. The row is applied by
+        Stage 4's drain for ``ingestion_id`` or by the drain worker.
 
         ``superseded_by`` set means the legacy supersession column is stamped
         and the row must currently be un-superseded; ``None`` means this is a
@@ -829,6 +835,14 @@ class SQLAlchemyRDBMSWrapper:
                      "reason": reason,
                      "created_at": now},
                 )
+
+            if enqueue_graph:
+                # The graph release, committed with the retirement or not at all.
+                from synap.cloud.agents.ingestion.storage import graph_sync_outbox
+                await graph_sync_outbox.enqueue(
+                    session, memory_ids=[memory_id], scope=scope, op="retire",
+                    reason="superseded" if superseded_by is not None else "deprecated",
+                    superseded_by=superseded_by, ingestion_id=ingestion_id)
 
             # The undo fuel. In the same transaction as the retirement above,
             # so the two cannot disagree.
