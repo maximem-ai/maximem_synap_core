@@ -30,15 +30,15 @@ CREATORS = {"upsert_entity_node", "_upsert_keyed_entity_node", "create_relations
 # Functions that only change a record that already exists, never its ownership:
 #   attach_memories_to_relationships  builds the memory dicts (stamped via memory_properties)
 #   add_memory_references             appends memory ids to a node
-#   relink / soft-delete / restore  rewrite existing memory dicts in place
+#   relink / restore                  rewrite existing memory dicts in place
 #
-# update_memory_on_edges is NOT a pure modifier: it APPENDS a new versioned memory
-# entry, so it is listed in MEMORY_BUILDERS and must stamp it.
+# soft_delete_memory_from_edges and update_memory_on_edges no longer write the
+# graph themselves: they delegate to the graph lifecycle service (DELEGATORS
+# below), whose writes are guarded by the LIFECYCLE tests further down.
 MODIFIERS = {
     "attach_memories_to_relationships",
     "add_memory_references",
     "relink_memories_to_canonical_edges",
-    "soft_delete_memory_from_edges",
     "restore_memory_on_edges",
 }
 
@@ -46,8 +46,24 @@ MODIFIERS = {
 # Functions that BUILD a memory entry. Each must stamp it with its instance.
 MEMORY_BUILDERS = {
     "attach_memories_to_relationships": "graph_boundary.memory_properties",
-    "update_memory_on_edges": "graph_boundary.INSTANCE_ID",
 }
+
+# Writer functions that change the graph only through GraphLifecycle. Each must
+# still delegate (a direct write would bypass the lifecycle tests below).
+DELEGATORS = {"soft_delete_memory_from_edges", "update_memory_on_edges"}
+
+
+# --- Graph lifecycle (releasing memories, closing and erasing records) -------
+#
+# These writes never create a record or change who owns it; the boundary they
+# must carry is the NAMESPACE: every one is scoped to one namespace, which the
+# service derives from the scope (scope_key.write_scope_id / readable_scope_ids,
+# graph_lifecycle.release_namespaces) or is handed by its caller, and every
+# Cypher statement of the adapter primitive matches `_namespace: $ns`.
+_LIFECYCLE = _ROOT / "graph_lifecycle.py"
+_ADAPTER = pathlib.Path(__file__).resolve().parents[2] / "providers" / "graph" / "adapters" / "neo4j.py"
+LIFECYCLE_WRITE_PRIMITIVES = {"release_memory_ids", "set_record_states", "erase_records",
+                              "rewrite_memory_contents"}
 
 
 def _functions():
@@ -124,3 +140,86 @@ def test_nothing_outside_the_writer_creates_graph_records():
             if pattern.search(line):
                 offenders.append(f"{path.relative_to(cloud.parent)}:{number}")
     assert not offenders, f"graph records created outside graph_wrapper: {offenders}"
+
+
+def test_the_legacy_helpers_delegate_to_the_lifecycle_service():
+    writers = _writers()
+    for fn in _functions():
+        if fn.name in DELEGATORS:
+            assert fn.name not in writers, f"{fn.name} writes the graph directly again"
+            assert _mentions(fn, "GraphLifecycle"), f"{fn.name} no longer goes through GraphLifecycle"
+
+
+def _lifecycle_calls():
+    """(function name, primitive, namespace argument) for every primitive the
+    lifecycle service calls through `self._call("<primitive>", ns, ...)`."""
+    tree = ast.parse(_LIFECYCLE.read_text())
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "_call" and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value in LIFECYCLE_WRITE_PRIMITIVES):
+                yield fn.name, node.args[0].value, (node.args[1] if len(node.args) > 1 else None)
+
+
+def test_every_lifecycle_write_names_its_namespace():
+    calls = list(_lifecycle_calls())
+    assert {p for _, p, _ in calls} == LIFECYCLE_WRITE_PRIMITIVES, (
+        "the lifecycle service no longer calls every listed write primitive, or calls a new one: "
+        "classify it here")
+    for name, primitive, ns in calls:
+        assert isinstance(ns, ast.Name) and ns.id == "ns", (
+            f"{name} calls {primitive} without a namespace taken from the scope (`ns`)")
+
+
+def test_the_lifecycle_namespaces_come_from_the_scope():
+    text = _LIFECYCLE.read_text()
+    tree = ast.parse(text)
+    fns = {f.name: ast.get_source_segment(text, f) for f in ast.walk(tree)
+           if isinstance(f, (ast.AsyncFunctionDef, ast.FunctionDef))}
+    assert "scope_key.write_scope_id" in fns["release_namespaces"]
+    assert "scope_key" in fns["erase_record"]
+
+
+def test_every_lifecycle_primitive_matches_on_the_namespace():
+    """Each Cypher statement the primitives run is bounded by `_namespace: $ns`."""
+    import importlib
+    adapter = importlib.import_module("synap.providers.graph.adapters.neo4j")
+    text = _ADAPTER.read_text()
+    tree = ast.parse(text)
+    # Module-level Cypher, as the module computes it (some are built with format()).
+    consts = {k: v for k, v in vars(adapter).items() if isinstance(v, str)}
+    seen = set()
+    for fn in ast.walk(tree):
+        if not (isinstance(fn, ast.FunctionDef) and fn.name in LIFECYCLE_WRITE_PRIMITIVES):
+            continue
+        seen.add(fn.name)
+        statements = []
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Name) and node.id in consts and "MATCH" in consts[node.id]:
+                statements.append((node.id, consts[node.id]))
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and "MATCH" in node.value:
+                statements.append(("inline", node.value))
+        assert statements, f"{fn.name}: no Cypher found to check"
+        for label, cypher in statements:
+            assert "_namespace: $ns" in cypher, f"{fn.name} runs {label} without `_namespace: $ns`"
+    assert seen == LIFECYCLE_WRITE_PRIMITIVES, f"adapter primitives missing: {LIFECYCLE_WRITE_PRIMITIVES - seen}"
+
+
+def test_nothing_outside_the_service_calls_the_lifecycle_primitives():
+    """A second caller would be a second place to get the namespace wrong."""
+    import re
+    cloud = pathlib.Path(__file__).resolve().parents[2] / "cloud"
+    pattern = re.compile(r"\.(?:" + "|".join(sorted(LIFECYCLE_WRITE_PRIMITIVES)) + r")\(")
+    allowed = {_LIFECYCLE, _WRITER}
+    offenders = []
+    for path in cloud.rglob("*.py"):
+        if path in allowed or "tests" in path.parts:
+            continue
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            if pattern.search(line):
+                offenders.append(f"{path.relative_to(cloud.parent)}:{number}")
+    assert not offenders, f"lifecycle primitives called outside GraphLifecycle: {offenders}"
