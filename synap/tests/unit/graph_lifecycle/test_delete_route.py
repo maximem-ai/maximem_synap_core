@@ -96,6 +96,19 @@ def wired(monkeypatch):
 
     from synap.cloud.shared import edition
     monkeypatch.setattr(edition, "acall", no_propagation)
+
+    # Outbox: record order against the session's commits.
+    state.events, state.completed = [], []
+
+    async def fake_enqueue(session, scope, memory_ids, *, op, reason):
+        state.events.append(("enqueue", op, reason, list(memory_ids), session.commits))
+        return ["row-1"]
+
+    async def fake_complete(row_ids):
+        state.completed.extend(row_ids)
+
+    monkeypatch.setattr(sdk_memories, "_enqueue_graph", fake_enqueue)
+    monkeypatch.setattr(sdk_memories, "_complete_graph_rows", fake_complete)
     return state
 
 
@@ -124,6 +137,10 @@ async def test_delete_erases_graph_support_and_reports_it(wired):
     # Postgres delete committed before the graph erase; cache dropped.
     assert session.commits >= 1
     assert len(wired.cache) == 1
+    # Outbox row written in the delete's transaction (before its commit) and
+    # marked done after the inline graph step.
+    assert wired.events == [("enqueue", "erase", "deleted", [mid], 0)]
+    assert wired.completed == ["row-1"]
 
 
 async def test_graph_failure_is_reported_never_fully_removed(wired):
@@ -132,6 +149,8 @@ async def test_graph_failure_is_reported_never_fully_removed(wired):
     assert answer.still_present_in == ["graph"]
     assert answer.fully_removed is False
     assert answer.graph_released is None
+    # The outbox row stays pending for the drain worker.
+    assert len(wired.events) == 1 and wired.completed == []
 
 
 async def test_delete_by_graph_edge_id_erases_record_and_reports_assertors(wired, monkeypatch):
@@ -185,3 +204,5 @@ async def test_update_retires_old_support_with_reason_updated(wired, monkeypatch
     assert wired.lifecycle.release_calls == [dict(ids=[mid], mode="retire", reason="updated",
                                                   redact=False)]
     assert len(wired.cache) == 1
+    assert wired.events == [("enqueue", "retire", "updated", [mid], 0)]
+    assert wired.completed == ["row-1"]

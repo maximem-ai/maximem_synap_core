@@ -24,13 +24,14 @@ class FakeLifecycle:
 class FakeSession:
     def __init__(self, ids):
         self.ids = ids
+        self.committed = False
 
     async def execute(self, stmt, params=None):
         rows = [(i, "text of " + i) for i in self.ids]
         return SimpleNamespace(fetchall=lambda: rows)
 
     async def commit(self):
-        return None
+        self.committed = True
 
 
 def _scope():
@@ -43,6 +44,17 @@ def lc(monkeypatch):
     monkeypatch.setenv("SYNAP_GRAPH_LIFECYCLE", "true")
     fake = FakeLifecycle()
     monkeypatch.setattr(soft_delete, "lifecycle_for", lambda graph, vector=None: fake)
+    fake.enqueued, fake.completed = [], []
+
+    async def enqueue(session, **kw):
+        fake.enqueued.append(dict(kw, committed=session.committed))
+        return ["row-1"]
+
+    async def complete(row_ids):
+        fake.completed.extend(row_ids)
+
+    monkeypatch.setattr(soft_delete, "enqueue_graph", enqueue)
+    monkeypatch.setattr(soft_delete, "complete_graph_rows", complete)
     return fake
 
 
@@ -53,6 +65,10 @@ async def test_forget_erases_with_redact(lc):
         graph=object())
     assert lc.calls == [dict(ids=ids, mode="erase", reason="deleted", redact=True)]
     assert res.still_present_in == []
+    e = lc.enqueued[0]
+    assert (e["memory_ids"], e["op"], e["reason"], e["redact"], e["committed"]) == \
+        (ids, "erase", "deleted", True, False)  # same transaction as the mark
+    assert lc.completed == ["row-1"]
 
 
 async def test_forget_graph_failure_reported(lc):
@@ -62,6 +78,7 @@ async def test_forget_graph_failure_reported(lc):
         FakeSession(ids), scope=_scope(), memory_ids=ids, reason="user asked",
         graph=object())
     assert res.still_present_in == ["graph"]
+    assert len(lc.enqueued) == 1 and lc.completed == []  # left for the drain worker
 
 
 async def test_retention_graph_retry_erases_and_drops_cache(monkeypatch):
