@@ -216,7 +216,8 @@ class StorageCoordinator:
     def _lifecycle(self):
         if self._graph_lifecycle is None and self._graph is not None:
             from .graph_lifecycle import GraphLifecycle
-            self._graph_lifecycle = GraphLifecycle(self._graph)
+            # vector: erasing a record also deletes its triple/entity vectors.
+            self._graph_lifecycle = GraphLifecycle(self._graph, vector=self._vector)
         return self._graph_lifecycle
 
     async def _retire_and_release(self, **kwargs) -> bool:

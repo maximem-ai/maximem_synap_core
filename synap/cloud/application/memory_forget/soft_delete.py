@@ -46,10 +46,11 @@ def graph_lifecycle_on(scope) -> bool:
     return graph_lifecycle_enabled(scope)
 
 
-def lifecycle_for(graph):
-    """The graph lifecycle service over *graph* (tests replace this)."""
+def lifecycle_for(graph, vector=None):
+    """The graph lifecycle service over *graph* (tests replace this). With
+    *vector*, erased records' triple and entity vectors are deleted too."""
     from synap.cloud.agents.ingestion.storage.graph_lifecycle import GraphLifecycle
-    return GraphLifecycle(graph)
+    return GraphLifecycle(graph, vector=vector)
 
 
 async def soft_delete_memories(
@@ -118,7 +119,7 @@ async def soft_delete_memories(
                 # supported are deleted (their sentence and embedding are a
                 # copy of the fact); copied-text entries are blanked. The old
                 # helper found nothing in id mode and changed nothing.
-                await lifecycle_for(graph).release(
+                await lifecycle_for(graph, vector).release(
                     scope, marked, mode="erase", reason="deleted", redact=True)
             else:
                 for mid in marked:

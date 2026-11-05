@@ -1704,7 +1704,10 @@ def _graph_lifecycle(graph_provider):
     """The graph lifecycle service over the cached graph wrapper. A module
     function so tests can replace it with a fake."""
     from synap.cloud.agents.ingestion.storage.graph_lifecycle import GraphLifecycle
-    return GraphLifecycle(graph_provider)
+    from synap.cloud.application.shared.providers import get_cached_providers
+    # The vector store too: erasing an edge or node also deletes its triple
+    # and entity vectors (a copy of the fact).
+    return GraphLifecycle(graph_provider, vector=get_cached_providers().get("vector"))
 
 
 def _graph_released(result) -> Optional[GraphReleased]:
