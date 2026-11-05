@@ -1489,6 +1489,10 @@ async def delete_memory(
     from the graph the caller WRITES to, never from a shared customer- or
     client-level graph it can merely read.
     """
+    # The B2C single-identifier contract, as every other route that accepts a
+    # customer_id applies it (shared.b2c_contract).
+    await _b2c_check(auth, customer_id, where="DELETE /api/v1/memories/{memory_id}",
+                     user_id=user_id)
     try:
         _uuid.UUID(memory_id)
     except ValueError:
@@ -1543,6 +1547,17 @@ async def delete_memory(
         logger.warning("deletion propagation failed memory_id=%s (non-fatal): %s",
                        memory_id, e)
 
+    # Deleting a newer fact restores the older fact it replaced (owner
+    # decision): the foreign key clears `superseded_by` on every memory this one
+    # superseded. Read which ones NOW, in this transaction, before the delete
+    # erases the evidence; the graph puts them back on the records that
+    # released them (GraphLifecycle.release(restore_ids=...)).
+    scope_for_graph = _scope_of_stored_row(auth, client_uuid, existing_row)
+    restore_map: Dict[str, List[str]] = {}
+    if _graph_lifecycle_on(scope_for_graph):
+        from synap.cloud.agents.ingestion.storage.graph_sync_outbox import superseded_by_any
+        restore_map = await superseded_by_any(session, [memory_id])
+
     # Clean up related data before deleting the memory
     await session.execute(
         text("DELETE FROM memory_entity_links WHERE memory_id = CAST(:memory_id AS uuid)"),
@@ -1561,9 +1576,8 @@ async def delete_memory(
     # is retried by the drain worker. Then commit before touching other
     # stores: the graph erase cannot be undone, and a Postgres rollback after
     # it would leave a live memory whose graph support is gone.
-    scope_for_graph = _scope_of_stored_row(auth, client_uuid, existing_row)
     graph_rows = await _enqueue_graph(session, scope_for_graph, [memory_id],
-                                      op="erase", reason="deleted")
+                                      op="erase", reason="deleted", restore_ids=restore_map)
     await session.commit()
 
     # Vector and graph cleanup, from the row's OWN ids.
@@ -1685,7 +1699,8 @@ async def delete_memory(
         try:
             if _graph_lifecycle_on(scope):
                 result = await _graph_lifecycle(graph_provider).release(
-                    scope, [memory_id], mode="erase", reason="deleted")
+                    scope, [memory_id], mode="erase", reason="deleted",
+                    restore_ids=restore_map.get(str(memory_id)))
                 graph_released = _graph_released(result)
                 await _complete_graph_rows(graph_rows)
             else:
@@ -1735,7 +1750,8 @@ def _graph_lifecycle(graph_provider):
     return GraphLifecycle(graph_provider, vector=get_cached_providers().get("vector"))
 
 
-async def _enqueue_graph(session, scope, memory_ids, *, op: str, reason: str) -> List[str]:
+async def _enqueue_graph(session, scope, memory_ids, *, op: str, reason: str,
+                         restore_ids: Optional[Dict[str, List[str]]] = None) -> List[str]:
     """Write the graph outbox rows for *memory_ids* with *session*, without
     committing (the caller commits them with its memory change). [] when the
     lifecycle is off or the outbox table does not exist (graph_reconcile is
@@ -1744,7 +1760,7 @@ async def _enqueue_graph(session, scope, memory_ids, *, op: str, reason: str) ->
         return []
     from synap.cloud.agents.ingestion.storage import graph_sync_outbox
     return await graph_sync_outbox.enqueue(session, memory_ids=memory_ids, scope=scope,
-                                           op=op, reason=reason)
+                                           op=op, reason=reason, restore_ids=restore_ids)
 
 
 async def _complete_graph_rows(row_ids: List[str]) -> None:
