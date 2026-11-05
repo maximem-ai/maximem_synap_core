@@ -1,6 +1,7 @@
 """
 Base interface for LLM providers.
 """
+import math
 import os
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, AsyncGenerator
@@ -34,6 +35,10 @@ def _seconds_from_env(name: str, default: Optional[float], environ=None) -> Opti
         seconds = float(value)
     except ValueError:
         raise ValueError(f"{name} must be a number of seconds or 'none', got {raw!r}") from None
+    if not math.isfinite(seconds):
+        # float() accepts 'nan' and 'inf'; 'inf' would silently mean "no limit"
+        # outside the documented 'none', and 'nan' is never a usable limit.
+        raise ValueError(f"{name} must be a finite number of seconds or 'none', got {raw!r}")
     if seconds < 0:
         raise ValueError(f"{name} must not be negative, got {raw!r}")
     return seconds
