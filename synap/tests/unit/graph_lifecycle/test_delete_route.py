@@ -25,6 +25,11 @@ class FakeResult:
     def fetchone(self):
         return self._row
 
+    def fetchall(self):
+        # The route reads which memories the deleted one had superseded
+        # (graph undo); none here.
+        return []
+
     def scalar(self):
         return self._scalar
 
@@ -52,7 +57,7 @@ class FakeLifecycle:
         self.fail, self.erased = fail, erased
 
     async def release(self, scope, memory_ids, *, mode, reason, superseded_by=None,
-                      redact=False):
+                      redact=False, restore_ids=None):
         self.release_calls.append(dict(ids=list(memory_ids), mode=mode, reason=reason,
                                        redact=redact))
         if self.fail:
@@ -105,7 +110,7 @@ def wired(monkeypatch):
     # Outbox: record order against the session's commits.
     state.events, state.completed = [], []
 
-    async def fake_enqueue(session, scope, memory_ids, *, op, reason):
+    async def fake_enqueue(session, scope, memory_ids, *, op, reason, restore_ids=None):
         state.events.append(("enqueue", op, reason, list(memory_ids), session.commits))
         return ["row-1"]
 
@@ -114,6 +119,12 @@ def wired(monkeypatch):
 
     monkeypatch.setattr(sdk_memories, "_enqueue_graph", fake_enqueue)
     monkeypatch.setattr(sdk_memories, "_complete_graph_rows", fake_complete)
+
+    # The B2C contract has its own tests (scoping/test_b2c_contract.py); here
+    # the instance is not B2C.
+    async def no_b2c(*a, **k):
+        return None
+    monkeypatch.setattr(sdk_memories, "_b2c_check", no_b2c)
     return state
 
 
