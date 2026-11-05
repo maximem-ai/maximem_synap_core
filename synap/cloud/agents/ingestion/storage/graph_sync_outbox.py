@@ -41,6 +41,23 @@ def backoff_seconds(attempts: int) -> int:
     return int(min(MAX_BACKOFF_SECONDS, BASE_BACKOFF_SECONDS * (2 ** max(0, attempts - 1))))
 
 
+def ingestion_grace_seconds() -> int:
+    """How long the background worker leaves a row written by an ingestion
+    alone. Such a row belongs to Stage 4, which drains it right after the
+    document's graph write (the rule must see the new memory's edges). The row
+    was due at once, so the worker could take it first: it released BEFORE the
+    graph write, raced Stage 4's own writes on the same records, and held the
+    lease while Stage 4's drain looked for it (the claim skips leased rows), so
+    Stage 4 found nothing to mark done and a failed worker attempt left the
+    row pending. After the grace the worker is the backstop (graph write
+    failed, process killed). SYNAP_GRAPH_SYNC_INGESTION_GRACE_SECONDS, default 300."""
+    import os
+    try:
+        return max(0, int(os.getenv("SYNAP_GRAPH_SYNC_INGESTION_GRACE_SECONDS", "300")))
+    except ValueError:
+        return 300
+
+
 async def table_available(session=None) -> bool:
     from synap.cloud.database import schema_compat
     ok = await schema_compat.has_table(TABLE, session)
@@ -121,11 +138,12 @@ async def enqueue(session, *, memory_ids: Iterable[Any], scope: Any, op: str, re
         await session.execute(
             text(f"""INSERT INTO {TABLE} (
                         id, memory_id, client_id, instance_id, customer_id, user_id, scope_level,
-                        namespaces, op, reason, superseded_by, redact, ingestion_id
+                        namespaces, op, reason, superseded_by, redact, ingestion_id, next_attempt_at
                         {', restore_memory_ids' if with_restore else ''})
                     VALUES (CAST(:id AS uuid), CAST(:memory_id AS uuid), :client_id, :instance_id,
                             :customer_id, :user_id, :scope_level, :namespaces, :op, :reason,
-                            CAST(:superseded_by AS uuid), :redact, CAST(:ingestion_id AS uuid)
+                            CAST(:superseded_by AS uuid), :redact, CAST(:ingestion_id AS uuid),
+                            now() + CAST(:grace AS interval)
                             {', CAST(:restore AS uuid[])' if with_restore else ''})"""),
             {"id": rid, "memory_id": mid,
              "client_id": str(scope.client_id),
@@ -136,6 +154,7 @@ async def enqueue(session, *, memory_ids: Iterable[Any], scope: Any, op: str, re
              "namespaces": namespaces, "op": op, "reason": reason,
              "superseded_by": _s(superseded_by), "redact": bool(redact),
              "ingestion_id": _s(ingestion_id),
+             "grace": f"{ingestion_grace_seconds() if ingestion_id is not None else 0} seconds",
              "restore": [str(x) for x in restore_ids.get(mid, [])]})
         row_ids.append(rid)
     return row_ids
