@@ -53,6 +53,7 @@ class ReleaseResult:
     legacy_entries_marked: int = 0
     records_closed: int = 0
     records_reopened: int = 0
+    memories_restored: int = 0
     vectors_deleted: int = 0
     vector_errors: int = 0
     namespaces: List[str] = field(default_factory=list)
@@ -125,8 +126,17 @@ class GraphLifecycle:
     # -- public ------------------------------------------------------------
 
     async def release(self, scope: Any, memory_ids: Iterable[Any], *, mode: str, reason: str,
-                      superseded_by: Optional[str] = None, redact: bool = False) -> ReleaseResult:
-        """Release *memory_ids* from the graph of every namespace *scope* reaches."""
+                      superseded_by: Optional[str] = None, redact: bool = False,
+                      restore_ids: Optional[Iterable[Any]] = None) -> ReleaseResult:
+        """Release *memory_ids* from the graph of every namespace *scope* reaches.
+
+        *restore_ids*: the memories the released ones had superseded (read from
+        Postgres BEFORE the delete; the foreign key clears ``superseded_by``).
+        Deleting the newer fact restores the older one (owner decision): each of
+        them that is alive again goes back into ``memory_ids`` of the records
+        that released it, and those records get the rule again, so the old line
+        reopens. A restore id that is not alive (itself deleted, or still
+        superseded) is left released."""
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
         ids = [str(i) for i in dict.fromkeys(memory_ids or []) if i]
@@ -136,14 +146,15 @@ class GraphLifecycle:
         for ns in release_namespaces(scope):
             total.add(await self.release_in_namespace(
                 ns, ids, mode=mode, reason=reason, superseded_by=superseded_by,
-                redact=redact, scope=scope))
+                redact=redact, scope=scope, restore_ids=restore_ids))
         logger.info("graph_lifecycle_release mode=%s reason=%s ids=%d result=%s",
                     mode, reason, len(ids), total.as_dict())
         return total
 
     async def release_in_namespace(self, ns: str, memory_ids: Iterable[Any], *, mode: str, reason: str,
                                    superseded_by: Optional[str] = None, redact: bool = False,
-                                   scope: Any = None) -> ReleaseResult:
+                                   scope: Any = None,
+                                   restore_ids: Optional[Iterable[Any]] = None) -> ReleaseResult:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
         ids = [str(i) for i in dict.fromkeys(memory_ids or []) if i]
@@ -170,9 +181,36 @@ class GraphLifecycle:
             await self._apply(ns, records, reason, result, now)
         if mode == "erase" and (deleted_edges or deleted_nodes):
             await self._erase_vectors(scope, deleted_edges, deleted_nodes, result)
+        if restore_ids:
+            await self._restore(ns, restore_ids, reason, result, now)
         if result.changed:
             result.namespaces.append(ns)
         return result
+
+    async def restore(self, ns: str, memory_ids: Iterable[Any]) -> ReleaseResult:
+        """Put alive *memory_ids* back on the records of *ns* that released
+        them and re-apply the rule (the undo of a supersession)."""
+        result = ReleaseResult()
+        await self._restore(ns, memory_ids, "unsupported", result, datetime.now(timezone.utc).isoformat())
+        if result.changed:
+            result.namespaces.append(ns)
+        return result
+
+    async def _restore(self, ns, memory_ids, reason, result: ReleaseResult, now: str) -> None:
+        from synap.cloud.agents.ingestion.services.graph_lifecycle_rule import is_alive
+        ids = [str(i) for i in dict.fromkeys(memory_ids or []) if i]
+        if not ids:
+            return
+        loader = self._load or _default_loader()
+        rows = await loader(ids)
+        alive = [i for i in ids if is_alive(rows.get(i))]
+        if not alive:
+            return
+        records = await self._call("restore_memory_ids", ns, alive, cap=RELEASED_CAP)
+        if not records:
+            return
+        result.memories_restored += len({i for r in records for i in (r.get("memory_ids") or []) if i in alive})
+        await self._apply(ns, records, reason, result, now)
 
     async def apply_states(self, ns: str, records: List[Dict[str, Any]], reason: str = "unsupported") -> int:
         """Evaluate *records* (``kind, id, memory_ids, released_memory_ids,

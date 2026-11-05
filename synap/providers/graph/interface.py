@@ -164,3 +164,11 @@ class GraphStoreInterface(ABC):
     def edges_with_memory_contents(self, namespace: str, ids: List[str]) -> List[Dict[str, Any]]:
         """Copies mode: the relationships whose ``memory_contents`` names one of *ids*."""
         raise NotImplementedError(f"{type(self).__name__} cannot search memory_contents")
+
+    def restore_memory_ids(self, namespace: str, ids: List[str], cap: int = 500) -> List[Dict[str, Any]]:
+        """Undo a release: move *ids* from ``released_memory_ids`` back to
+        ``memory_ids`` on every edge and node of *namespace* that released them,
+        in one write transaction. The record's state is not changed (the caller
+        re-applies the rule). Returns the touched records (kind, id, memory_ids,
+        released_memory_ids, is_fixed_entity, retired_at)."""
+        raise NotImplementedError(f"{type(self).__name__} cannot restore memory ids")

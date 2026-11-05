@@ -213,6 +213,26 @@ DETACH DELETE n
 RETURN id, name, entity_type, vector_name, memory_ids
 """ % _FIXED.format(v="n")
 
+# Undo of a supersession: the ids go back from `released_memory_ids` to
+# `memory_ids` (no duplicates, newest $cap kept). The state is NOT changed
+# here: the caller re-applies the rule, which reopens the record only when an
+# alive memory supports it.
+_RESTORE = """
+MATCH (x:SynapNode {{_namespace: $ns}}){pattern}
+WHERE {where} any(i IN coalesce(x.released_memory_ids, []) WHERE i IN $ids)
+WITH x, coalesce(x.memory_ids, []) AS current,
+     [i IN x.released_memory_ids WHERE i IN $ids] AS back
+WITH x, current + [i IN back WHERE NOT i IN current] AS merged
+SET x.memory_ids = CASE WHEN size(merged) > $cap THEN merged[size(merged) - $cap..] ELSE merged END,
+    x.released_memory_ids = [i IN x.released_memory_ids WHERE NOT i IN $ids]
+RETURN x.id AS id, x.memory_ids AS memory_ids, x.released_memory_ids AS released_memory_ids,
+       {fixed} AS is_fixed_entity, x.retired_at AS retired_at
+"""
+_RESTORE_EDGES = _RESTORE.replace("MATCH (x:SynapNode {{_namespace: $ns}}){pattern}",
+                                  "MATCH (:SynapNode {{_namespace: $ns}})-[x]->(:SynapNode)").format(
+    where="x._namespace = $ns AND", fixed="false")
+_RESTORE_NODES = _RESTORE.format(pattern="", where="", fixed=_FIXED.format(v="x"))
+
 _LIST_NAMESPACES = """
 MATCH (n:SynapNode) WHERE n._namespace IS NOT NULL
 RETURN DISTINCT n._namespace AS ns
@@ -223,7 +243,8 @@ MATCH (a:SynapNode {_namespace: $ns})-[r]->(:SynapNode)
 WHERE r._namespace = $ns AND ($ids IS NULL OR r.id IN $ids)
 RETURN r.id AS id, coalesce(r.memory_ids, []) AS memory_ids,
        coalesce(r.released_memory_ids, []) AS released_memory_ids,
-       r.memory_contents AS memory_contents, r.retired_at AS retired_at
+       r.memory_contents AS memory_contents, r.retired_at AS retired_at,
+       r.retired_reason AS retired_reason, r.retired_by_memory_id AS retired_by_memory_id
 """
 
 _LIFECYCLE_NODES = """
@@ -231,7 +252,8 @@ MATCH (n:SynapNode {_namespace: $ns})
 WHERE $ids IS NULL OR n.id IN $ids
 RETURN n.id AS id, coalesce(n.memory_ids, []) AS memory_ids,
        coalesce(n.released_memory_ids, []) AS released_memory_ids,
-       %s AS is_fixed_entity, n.retired_at AS retired_at
+       %s AS is_fixed_entity, n.retired_at AS retired_at,
+       n.retired_reason AS retired_reason, n.retired_by_memory_id AS retired_by_memory_id
 """ % _FIXED.format(v="n")
 
 # Copies mode: the relationships whose memory_contents JSON names one of $ids.
@@ -1055,6 +1077,20 @@ class Neo4jAdapter(GraphStoreInterface):
                         + [{"kind": "node", "id": n["id"], "memory_ids": n.get("memory_ids") or []} for n in nodes]),
         }
 
+    def restore_memory_ids(self, namespace: str, ids: List[str], cap: int = 500) -> List[Dict[str, Any]]:
+        """See GraphStoreInterface.restore_memory_ids."""
+        ids = [str(i) for i in dict.fromkeys(ids or []) if i]
+        if not ids:
+            return []
+        params = {"ns": namespace, "ids": ids, "cap": int(cap)}
+
+        def work(tx):
+            edges = [dict(r.data(), kind="edge") for r in tx.run(_RESTORE_EDGES, params)]
+            nodes = [dict(r.data(), kind="node") for r in tx.run(_RESTORE_NODES, params)]
+            return edges + nodes
+
+        return self._run_in_write_tx(work)
+
     def list_namespaces(self) -> List[str]:
         """Every graph namespace that holds a node (for the reconciler)."""
         return [r["ns"] for r in self._run_query(_LIST_NAMESPACES, {})]
@@ -1076,11 +1112,15 @@ class Neo4jAdapter(GraphStoreInterface):
                     legacy = []
             out.append({"kind": "edge", "id": e["id"], "memory_ids": list(e["memory_ids"]),
                         "released_memory_ids": list(e["released_memory_ids"]), "legacy_ids": legacy,
-                        "is_fixed_entity": False, "retired_at": e.get("retired_at")})
+                        "is_fixed_entity": False, "retired_at": e.get("retired_at"),
+                        "retired_reason": e.get("retired_reason"),
+                        "retired_by_memory_id": e.get("retired_by_memory_id")})
         for n in self._run_query(_LIFECYCLE_NODES, {"ns": namespace, "ids": None if ids is None else [str(i) for i in ids]}):
             out.append({"kind": "node", "id": n["id"], "memory_ids": list(n["memory_ids"]),
                         "released_memory_ids": list(n["released_memory_ids"]), "legacy_ids": [],
-                        "is_fixed_entity": bool(n["is_fixed_entity"]), "retired_at": n.get("retired_at")})
+                        "is_fixed_entity": bool(n["is_fixed_entity"]), "retired_at": n.get("retired_at"),
+                        "retired_reason": n.get("retired_reason"),
+                        "retired_by_memory_id": n.get("retired_by_memory_id")})
         return out
 
     def edges_with_memory_contents(self, namespace: str, ids: List[str]) -> List[Dict[str, Any]]:
