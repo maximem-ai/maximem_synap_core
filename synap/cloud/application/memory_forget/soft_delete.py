@@ -41,6 +41,17 @@ class SoftDeleteResult:
     still_present_in: List[str] = field(default_factory=list)
 
 
+def graph_lifecycle_on(scope) -> bool:
+    from synap.cloud.agents.ingestion.storage.coordinator import graph_lifecycle_enabled
+    return graph_lifecycle_enabled(scope)
+
+
+def lifecycle_for(graph):
+    """The graph lifecycle service over *graph* (tests replace this)."""
+    from synap.cloud.agents.ingestion.storage.graph_lifecycle import GraphLifecycle
+    return GraphLifecycle(graph)
+
+
 async def soft_delete_memories(
     session,
     *,
@@ -102,9 +113,17 @@ async def soft_delete_memories(
 
     if graph is not None:
         try:
-            for mid in marked:
-                await graph.soft_delete_memory_from_edges(memory_id=mid, scope=scope,
-                                                          redact=True)
+            if graph_lifecycle_on(scope):
+                # Erase with redact: edges and nodes only these memories
+                # supported are deleted (their sentence and embedding are a
+                # copy of the fact); copied-text entries are blanked. The old
+                # helper found nothing in id mode and changed nothing.
+                await lifecycle_for(graph).release(
+                    scope, marked, mode="erase", reason="deleted", redact=True)
+            else:
+                for mid in marked:
+                    await graph.soft_delete_memory_from_edges(memory_id=mid, scope=scope,
+                                                              redact=True)
         except Exception as exc:  # noqa: BLE001
             result.still_present_in.append("graph")
             logger.error("forget_graph_cleanup_failed: the rows are marked but their "
