@@ -12,13 +12,14 @@ Per namespace (one per scope that holds graph records):
   1. collect every memory id on edges and nodes (`memory_ids`, and the ids of
      copied-text `memory_contents` entries);
   2. ask Postgres which are alive (batched `id = ANY(...)`);
-  3. evaluate every backed record with `graph_record_state` (T1 and T2) BEFORE
-     releasing anything, because T2 needs the superseded supporter still on
-     the record to see who replaced it;
-  4. release dead ids: `erase` when the row is gone or forgotten (`deleted_at`:
-     a deletion whose graph step never ran, so the text must go), `retire`
-     when superseded or deprecated (history is kept);
-  5. write the computed states (close, or reopen a record retired by mistake).
+  3. release dead ids through the graph lifecycle service: `erase` when the
+     row is gone or forgotten (`deleted_at`: a deletion whose graph step never
+     ran, so the text must go), `retire` with the successor when superseded or
+     deprecated (history is kept). The service applies the shared rule
+     (`graph_record_state`, T1 and T2) to every record it touches, in both the
+     id format and the older copied-text format;
+  4. re-apply the rule to records already retired, so one a live memory
+     supports reopens.
 Records that never had a supporting memory are left alone and counted
 (`unbacked_records`): the source they came from cannot be recovered.
 Running it twice changes nothing the second time.
@@ -30,7 +31,6 @@ import asyncio
 import json
 import logging
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -46,15 +46,18 @@ class NamespaceReport:
     dead_ids: int = 0
     ids_to_erase: int = 0
     ids_to_retire: int = 0
-    legacy_dead_ids: int = 0
-    records_to_close: int = 0
-    records_to_reopen: int = 0
+    legacy_ids_to_release: int = 0
+    records_with_dead_support: int = 0
     unbacked_records: int = 0
+    # Filled by --commit, from the lifecycle service's own result.
     edges_retired: int = 0
     edges_deleted: int = 0
     nodes_retired: int = 0
     nodes_deleted: int = 0
-    states_written: int = 0
+    legacy_entries_marked: int = 0
+    records_closed: int = 0
+    records_reopened: int = 0
+    states_rewritten: int = 0
     committed: bool = False
     error: Optional[str] = None
 
@@ -70,127 +73,101 @@ class ReconcileReport:
         return {k: sum(getattr(n, k) for n in self.namespaces) for k in keys}
 
 
-async def _alive_rows(ids: List[str], load_rows) -> Dict[str, Any]:
+async def _rows(ids: List[str], load_rows) -> Dict[str, Any]:
     rows: Dict[str, Any] = {}
     for i in range(0, len(ids), BATCH):
         rows.update(await load_rows(ids[i:i + BATCH]))
     return rows
 
 
-def _raw_provider(graph):
-    """The synchronous graph adapter (the async wrapper keeps it in _provider)."""
-    return getattr(graph, "_provider", graph)
+_RESULT_FIELDS = ("edges_retired", "edges_deleted", "nodes_retired", "nodes_deleted",
+                  "legacy_entries_marked", "records_closed", "records_reopened")
 
 
-async def reconcile_namespace(provider, namespace: str, *, commit: bool,
-                              load_rows=None, now: Optional[str] = None) -> NamespaceReport:
-    from synap.cloud.agents.ingestion.services.graph_lifecycle_rule import (
-        GraphRecord, graph_record_state, is_alive)
+async def reconcile_namespace(lifecycle, namespace: str, *, commit: bool,
+                              load_rows=None) -> NamespaceReport:
+    """Report (and with *commit*, repair) one namespace.
+
+    All graph reads and writes, and the decision whether a record is current,
+    belong to the lifecycle service (`GraphLifecycle`) and the shared rule it
+    applies. This function only decides which ids are dead in Postgres and
+    how each must be released: `erase` when the row is gone or forgotten (a
+    deletion whose graph step never ran, so the text must go), `retire` with
+    its successor when superseded or deprecated.
+    """
+    from synap.cloud.shared.memory_liveness import is_alive
 
     if load_rows is None:
         from synap.cloud.shared.memory_liveness import load_supporter_rows as load_rows
-    now = now or datetime.now(timezone.utc).isoformat()
     rep = NamespaceReport(namespace=namespace, committed=commit)
 
-    records = await asyncio.to_thread(provider.lifecycle_records, namespace)
+    records = await lifecycle.records_in_namespace(namespace)
     rep.records = len(records)
     ids: List[str] = []
     legacy: set = set()
     for r in records:
-        ids.extend(str(i) for i in (r.get("memory_ids") or []))
-        for i in (r.get("legacy_ids") or []):
-            legacy.add(str(i))
-            ids.append(str(i))
+        mem = [str(i) for i in (r.get("memory_ids") or [])]
+        leg = [str(i) for i in (r.get("legacy_ids") or [])]
+        if not mem and not leg and not (r.get("released_memory_ids") or []):
+            # Never backed by a memory: the source cannot be recovered. Left alone.
+            rep.unbacked_records += 1
+        ids.extend(mem)
+        ids.extend(leg)
+        legacy.update(leg)
     ids = list(dict.fromkeys(ids))
     rep.ids_checked = len(ids)
-    # Released ids are history, but the rule needs their rows: a record closed
-    # by T2 keeps live older supporters, and only the released superseded id
-    # says who replaced it. Without it the second run would reopen the record.
-    history = list(dict.fromkeys(
-        str(i) for r in records for i in (r.get("released_memory_ids") or [])
-        if str(i) not in set(ids)))
-    rows = await _alive_rows(ids + history, load_rows) if (ids or history) else {}
+    rows = await _rows(ids, load_rows) if ids else {}
 
-    dead = [i for i in ids if not is_alive(rows.get(i))]
+    dead = {i for i in ids if not is_alive(rows.get(i))}
     rep.dead_ids = len(dead)
-    erase_ids = [i for i in dead if i not in legacy
-                 and (rows.get(i) is None or getattr(rows[i], "deleted_at", None) is not None)]
+    rep.legacy_ids_to_release = len(dead & legacy)
+    rep.records_with_dead_support = sum(
+        1 for r in records
+        if dead & {str(i) for i in (r.get("memory_ids") or []) + (r.get("legacy_ids") or [])})
+
+    erase_ids = sorted(i for i in dead
+                       if rows.get(i) is None or getattr(rows[i], "deleted_at", None) is not None)
     retire_groups: Dict[Optional[str], List[str]] = {}
-    for i in dead:
-        if i in legacy or i in erase_ids:
-            continue
+    for i in sorted(dead - set(erase_ids)):
         retire_groups.setdefault(getattr(rows[i], "superseded_by", None), []).append(i)
     rep.ids_to_erase = len(erase_ids)
     rep.ids_to_retire = sum(len(v) for v in retire_groups.values())
-    rep.legacy_dead_ids = len([i for i in dead if i in legacy])
-
-    # 3. States, from the records as they are now (before any release).
-    states: List[Dict[str, Any]] = []
-    for r in records:
-        mem = [str(i) for i in (r.get("memory_ids") or [])] or \
-              [str(i) for i in (r.get("legacy_ids") or [])]
-        released = [str(i) for i in (r.get("released_memory_ids") or [])]
-        if not mem and not released:
-            rep.unbacked_records += 1
-            continue
-        if r.get("is_fixed_entity"):
-            continue
-        state = graph_record_state(
-            # TEMPORARY until G1's rule reads released ids itself (lead
-            # decision, CONTRACT_GRAPH.md): released ids count only when their
-            # memory is not alive, the same as GraphLifecycle._apply. An edited
-            # memory (alive, released as "updated") is no longer support.
-            GraphRecord(memory_ids=list(dict.fromkeys(
-                mem + [i for i in released if i not in mem and not is_alive(rows.get(i))])),
-                        released_memory_ids=released,
-                        is_fixed_entity=bool(r.get("is_fixed_entity"))),
-            rows)
-        retired = r.get("retired_at") is not None
-        if state.is_open and retired and mem:
-            rep.records_to_reopen += 1
-            states.append({"kind": r.get("kind"), "id": r.get("id"), "open": True, "now": now,
-                           "reason": None, "valid_to": None, "retired_by_memory_id": None})
-        elif not state.is_open and not retired:
-            rep.records_to_close += 1
-            valid_to = getattr(state, "valid_to", None)
-            states.append({"kind": r.get("kind"), "id": r.get("id"), "open": False, "now": now,
-                           "reason": state.reason,
-                           "valid_to": valid_to.isoformat() if valid_to else None,
-                           "retired_by_memory_id": getattr(state, "by_memory", None)})
 
     if not commit:
         return rep
 
-    def _count(res: Dict[str, Any]) -> None:
-        rep.edges_retired += int(res.get("edges_retired", 0) or 0)
-        rep.edges_deleted += int(res.get("edges_deleted", 0) or 0)
-        rep.nodes_retired += int(res.get("nodes_retired", 0) or 0)
-        rep.nodes_deleted += int(res.get("nodes_deleted", 0) or 0)
+    def _count(result) -> None:
+        for f in _RESULT_FIELDS:
+            setattr(rep, f, getattr(rep, f) + int(getattr(result, f, 0) or 0))
 
     if erase_ids:
-        _count(await asyncio.to_thread(provider.release_memory_ids, namespace, erase_ids,
-                                       "erase", now, "deleted", None))
+        _count(await lifecycle.release_in_namespace(
+            namespace, erase_ids, mode="erase", reason="deleted"))
     for successor, group in retire_groups.items():
-        reason = "superseded" if successor else "unsupported"
-        _count(await asyncio.to_thread(provider.release_memory_ids, namespace, group,
-                                       "retire", now, reason, successor))
-    if states:
-        rep.states_written = int(await asyncio.to_thread(
-            provider.set_record_states, namespace, states) or 0)
+        _count(await lifecycle.release_in_namespace(
+            namespace, group, mode="retire",
+            reason="superseded" if successor else "unsupported", superseded_by=successor))
+    # Records already retired (by an earlier release or a mistaken one) get the
+    # rule again, so one that a live memory supports reopens.
+    retired = [str(r.get("id")) for r in records if r.get("retired_at")]
+    if retired:
+        rep.states_rewritten = int(await lifecycle.reevaluate(namespace, retired) or 0)
     return rep
 
 
 async def reconcile(graph, *, commit: bool = False,
                     namespaces: Optional[Iterable[str]] = None,
-                    load_rows=None) -> ReconcileReport:
-    provider = _raw_provider(graph)
+                    load_rows=None, lifecycle=None) -> ReconcileReport:
+    if lifecycle is None:
+        from synap.cloud.agents.ingestion.storage.graph_lifecycle import GraphLifecycle
+        lifecycle = GraphLifecycle(graph, load_supporters=load_rows)
     if namespaces is None:
-        namespaces = await asyncio.to_thread(provider.list_namespaces)
+        namespaces = await lifecycle.list_namespaces()
     report = ReconcileReport(committed=commit)
     for ns in namespaces:
         try:
             report.namespaces.append(
-                await reconcile_namespace(provider, ns, commit=commit, load_rows=load_rows))
+                await reconcile_namespace(lifecycle, ns, commit=commit, load_rows=load_rows))
         except Exception as e:  # noqa: BLE001 - one namespace must not stop the rest
             logger.error("graph_reconcile namespace=%s failed: %s", ns, e, exc_info=True)
             report.namespaces.append(NamespaceReport(namespace=ns, committed=False,
@@ -211,12 +188,13 @@ def _print(report: ReconcileReport, as_json: bool) -> None:
             print(f"  {n.namespace}: FAILED {n.error}")
             continue
         print(f"  {n.namespace}: records={n.records} ids={n.ids_checked} dead={n.dead_ids} "
-              f"erase={n.ids_to_erase} retire={n.ids_to_retire} legacy_dead={n.legacy_dead_ids} "
-              f"close={n.records_to_close} reopen={n.records_to_reopen} "
-              f"unbacked={n.unbacked_records}"
+              f"erase={n.ids_to_erase} retire={n.ids_to_retire} legacy={n.legacy_ids_to_release} "
+              f"records_with_dead_support={n.records_with_dead_support} unbacked={n.unbacked_records}"
               + (f" | edges retired={n.edges_retired} deleted={n.edges_deleted} "
                  f"nodes retired={n.nodes_retired} deleted={n.nodes_deleted} "
-                 f"states={n.states_written}" if n.committed else ""))
+                 f"legacy_marked={n.legacy_entries_marked} closed={n.records_closed} "
+                 f"reopened={n.records_reopened} reevaluated={n.states_rewritten}"
+                 if n.committed else ""))
     print(f"  totals: {report.totals()}")
 
 

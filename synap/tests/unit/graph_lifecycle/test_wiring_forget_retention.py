@@ -42,7 +42,7 @@ def _scope():
 def lc(monkeypatch):
     monkeypatch.setenv("SYNAP_GRAPH_LIFECYCLE", "true")
     fake = FakeLifecycle()
-    monkeypatch.setattr(soft_delete, "lifecycle_for", lambda graph: fake)
+    monkeypatch.setattr(soft_delete, "lifecycle_for", lambda graph, vector=None: fake)
     return fake
 
 
