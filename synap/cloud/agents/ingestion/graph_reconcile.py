@@ -49,6 +49,9 @@ class NamespaceReport:
     legacy_ids_to_release: int = 0
     records_with_dead_support: int = 0
     unbacked_records: int = 0
+    # Released memories alive again because the memory that superseded them
+    # was deleted (owner decision: deleting a newer fact restores the older).
+    ids_to_restore: int = 0
     # Filled by --commit, from the lifecycle service's own result.
     edges_retired: int = 0
     edges_deleted: int = 0
@@ -58,6 +61,7 @@ class NamespaceReport:
     records_closed: int = 0
     records_reopened: int = 0
     states_rewritten: int = 0
+    memories_restored: int = 0
     committed: bool = False
     error: Optional[str] = None
 
@@ -81,7 +85,7 @@ async def _rows(ids: List[str], load_rows) -> Dict[str, Any]:
 
 
 _RESULT_FIELDS = ("edges_retired", "edges_deleted", "nodes_retired", "nodes_deleted",
-                  "legacy_entries_marked", "records_closed", "records_reopened")
+                  "legacy_entries_marked", "records_closed", "records_reopened", "memories_restored")
 
 
 async def reconcile_namespace(lifecycle, namespace: str, *, commit: bool,
@@ -133,6 +137,21 @@ async def reconcile_namespace(lifecycle, namespace: str, *, commit: bool,
     rep.ids_to_erase = len(erase_ids)
     rep.ids_to_retire = sum(len(v) for v in retire_groups.values())
 
+    # Undo of a supersession whose inline step never ran: a record retired by
+    # memory N (`retired_by_memory_id`) whose N row is gone, and which released
+    # a memory that is alive again (the foreign key cleared its superseded_by).
+    by_ids = sorted({str(r["retired_by_memory_id"]) for r in records if r.get("retired_by_memory_id")})
+    rel_ids = sorted({str(i) for r in records if r.get("retired_by_memory_id")
+                      for i in (r.get("released_memory_ids") or [])})
+    extra = [i for i in by_ids + rel_ids if i not in rows]
+    if extra:
+        rows.update(await _rows(extra, load_rows))
+    restore_ids = sorted({
+        str(i) for r in records
+        if r.get("retired_by_memory_id") and rows.get(str(r["retired_by_memory_id"])) is None
+        for i in (r.get("released_memory_ids") or []) if is_alive(rows.get(str(i)))})
+    rep.ids_to_restore = len(restore_ids)
+
     if not commit:
         return rep
 
@@ -147,6 +166,8 @@ async def reconcile_namespace(lifecycle, namespace: str, *, commit: bool,
         _count(await lifecycle.release_in_namespace(
             namespace, group, mode="retire",
             reason="superseded" if successor else "unsupported", superseded_by=successor))
+    if restore_ids:
+        _count(await lifecycle.restore(namespace, restore_ids))
     # Records already retired (by an earlier release or a mistaken one) get the
     # rule again, so one that a live memory supports reopens.
     retired = [str(r.get("id")) for r in records if r.get("retired_at")]
@@ -173,6 +194,27 @@ async def reconcile(graph, *, commit: bool = False,
             report.namespaces.append(NamespaceReport(namespace=ns, committed=False,
                                                      error=f"{type(e).__name__}: {e}"))
     return report
+
+
+def resolve_stores():
+    """The graph and vector stores, built the way the server builds them.
+
+    The server fills the provider cache at start-up (initialize_providers_once);
+    a command run with `python -m` inside the container is a fresh process
+    whose cache is empty, so the stores are built here from the same
+    environment (NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD, CHROMA_HOST/CHROMA_PORT).
+    Importing the edition module first applies the edition's environment
+    (Core's pinned flags), as at server start. Postgres is opened lazily from
+    the same settings by the liveness loader. Returns (graph, vector); either
+    may be None.
+    """
+    import synap.cloud.shared.edition  # noqa: F401 - applies CORE_ENV on import
+    from synap.cloud.application.shared import providers
+
+    cached = providers.get_cached_providers()
+    graph = cached.get("graph") or providers.get_graph_provider()
+    vector = cached.get("vector") or providers.get_vector_provider()
+    return graph, vector
 
 
 def _print(report: ReconcileReport, as_json: bool) -> None:
@@ -205,12 +247,14 @@ async def _main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--json", action="store_true", help="print the report as JSON")
     args = parser.parse_args(argv)
 
-    from synap.cloud.application.shared.providers import get_cached_providers
-    graph = get_cached_providers().get("graph")
+    graph, vector = resolve_stores()
     if graph is None:
-        print("graph_reconcile: no graph store is configured")
+        print("graph_reconcile: no graph store is configured (NEO4J_URI unset or Neo4j unreachable; "
+              "see the log line above)")
         return 2
-    report = await reconcile(graph, commit=args.commit, namespaces=args.namespace)
+    from synap.cloud.agents.ingestion.storage.graph_lifecycle import GraphLifecycle
+    report = await reconcile(graph, commit=args.commit, namespaces=args.namespace,
+                             lifecycle=GraphLifecycle(graph, vector=vector))
     _print(report, args.json)
     return 1 if any(n.error for n in report.namespaces) else 0
 

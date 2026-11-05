@@ -113,3 +113,53 @@ async def test_unbacked_only_namespace_changes_nothing():
     n = (await graph_reconcile.reconcile(None, commit=True, load_rows=_load,
                                          lifecycle=lc)).namespaces[0]
     assert n.unbacked_records == 1 and lc.release_calls == [] and lc.reevaluated == []
+
+
+def test_cli_builds_its_stores_from_the_environment(monkeypatch):
+    """Inside the container the command is a fresh process: the server's
+    provider cache is empty, so the stores must come from the env."""
+    from synap.cloud.application.shared import providers
+    from synap.providers.graph.adapters import neo4j as neo4j_mod
+
+    built = {}
+
+    class FakeNeo4j:
+        def __init__(self, config):
+            built["config"] = config
+
+        def connect(self):
+            built["connected"] = True
+
+    monkeypatch.setattr(neo4j_mod, "Neo4jAdapter", FakeNeo4j)
+    monkeypatch.setitem(providers._providers_cache, "graph", None)
+    monkeypatch.setitem(providers._providers_cache, "vector", None)
+    monkeypatch.setenv("NEO4J_URI", "bolt://neo4j:7687")
+    monkeypatch.setenv("NEO4J_USER", "neo4j")
+    monkeypatch.setenv("NEO4J_PASSWORD", "pw-from-env")
+    monkeypatch.delenv("CHROMA_HOST", raising=False)
+
+    graph, vector = graph_reconcile.resolve_stores()
+    assert graph is not None and isinstance(graph._provider, FakeNeo4j)
+    assert built == {"config": {"uri": "bolt://neo4j:7687", "user": "neo4j",
+                                "password": "pw-from-env"}, "connected": True}
+    assert vector is None
+
+
+async def test_cli_main_runs_a_dry_run_with_env_stores(monkeypatch, capsys):
+    class Adapter:
+        def list_namespaces(self):
+            return ["ns1"]
+
+        def lifecycle_records(self, ns, ids=None):
+            return [{"kind": "edge", "id": "e", "memory_ids": []}]
+
+    monkeypatch.setattr(graph_reconcile, "resolve_stores", lambda: (Adapter(), None))
+    code = await graph_reconcile._main(["--json"])
+    out = capsys.readouterr().out
+    assert code == 0 and '"unbacked_records": 1' in out and '"committed": false' in out
+
+
+async def test_cli_without_a_graph_store_says_so(monkeypatch, capsys):
+    monkeypatch.setattr(graph_reconcile, "resolve_stores", lambda: (None, None))
+    assert await graph_reconcile._main([]) == 2
+    assert "no graph store" in capsys.readouterr().out
