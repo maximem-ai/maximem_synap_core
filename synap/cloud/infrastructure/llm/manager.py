@@ -18,6 +18,7 @@ from .models import (
     SelectionCriteria,
     LLMError,
     ProviderError,
+    ProviderTimeoutError,
     RateLimitError,
 )
 from . import call_trace
@@ -571,6 +572,29 @@ class LLMConfigManager:
                 else:
                     break  # No more fallbacks
 
+            except ProviderTimeoutError as e:
+                # The provider did not answer in time. The call fails (so the
+                # caller's retry runs), but a slow or stuck request is not
+                # evidence that the model is down: do NOT record it in the
+                # availability tracker, or three slow calls in the penalty
+                # window would take the only configured model offline.
+                logger.warning(f"Provider timeout for {current_model.name}: {e}")
+                last_error = e
+                failures.append(f"{current_model.name}: {e}")
+
+                attempted_models.append(current_model.name)
+                fallback = await self._selector.get_fallback_model(
+                    original_provider=pinned_provider,
+                    original_model=current_model.name,
+                )
+                fallback = self._allowed_fallback(pinned_provider, fallback)
+
+                if fallback and fallback.name not in attempted_models:
+                    current_model = fallback
+                    logger.info(f"Falling back to {fallback.name}")
+                else:
+                    break
+
             except ProviderError as e:
                 logger.error(f"Provider error for {current_model.name}: {e}")
                 last_error = e
@@ -792,6 +816,10 @@ class LLMConfigManager:
                 model=model_info.name,
             )
             raise
+        except ProviderTimeoutError as e:
+            # Same rule as complete(): a timeout is not counted toward availability.
+            trace_error = e
+            raise LLMError(f"Streaming failed: {e}")
         except Exception as e:
             trace_error = e
             await self._tracker.record_error(
