@@ -208,7 +208,7 @@ Synap rewrites what a user said into a short statement about them, so the printe
 - **Memory extraction.** Conversations and documents become short, durable statements about people, preferences, facts and events. Compaction runs automatically in the background, so turns recorded one by one become long-term memory and long conversations keep a rolling summary.
 - **Entity resolution.** When a user says *"my manager"* in turn 3 and *"Sarah"* in turn 12, Synap resolves them to one entity, across sessions and conversations, without the agent doing any work.
 - **Temporal awareness.** Dates and times in what users say are understood and stored, and a newer fact that replaces an older one supersedes it instead of sitting next to it. Context from 30 minutes ago and from 30 days ago do not carry equal weight.
-- **Vector and graph retrieval.** Two modes: **fast** searches vectors, **accurate** adds the knowledge graph. Compound questions ("X or Y", "X compared to Y") are split into parts automatically.
+- **Vector and graph retrieval.** Two modes: **fast** searches vectors, **accurate** adds the knowledge graph. Compound questions ("X or Y", "X compared to Y") are split into parts automatically. A graph statement is served only while a live memory supports it: when a memory is replaced by a newer one, edited or deleted, the graph lines it backed are closed or removed.
 - **User and customer scoping.** Memory is kept apart per user and per customer, and install-wide facts are readable next to both. Choose the mode that fits your app before you store anything ([guide](https://docs.maximem.ai/core/scoping-mode)):
 
   ```
@@ -217,6 +217,15 @@ Synap rewrites what a user said into a short statement about them, so the printe
   ```
 
 - **Forget.** Delete a memory by id, or ask Synap to forget something by description ("ignore what I said about the budget"). Description-based forget needs your own Jev API key. [Forget →](https://docs.maximem.ai/core/forget)
+
+  Deleting by id also works for the graph items accurate mode returns (a relationship such as "the user works at Acme Corp", or an entity). That deletes the graph line only; the response lists in `still_asserted_by` the memories that still say it, so you can delete them too. Every delete response reports `kind` (`memory`, `relationship` or `entity`), `graph_released` (graph records changed) and `still_present_in` (stores that could not be cleaned); `fully_removed` is true only when nothing is left anywhere.
+
+  Graphs written before this version may still hold lines whose memories were replaced or deleted. Repair them once (it only reports until you add `--commit`):
+
+  ```bash
+  docker compose -f deploy/docker-compose.yml exec synap python -m synap.cloud.agents.ingestion.graph_reconcile
+  docker compose -f deploy/docker-compose.yml exec synap python -m synap.cloud.agents.ingestion.graph_reconcile --commit
+  ```
 - **Images.** Synap reads images in a conversation or an upload when the model you configured has vision. [Images →](https://docs.maximem.ai/core/images)
 - **A memory config you write.** One YAML file decides what is remembered and how it is shaped. The server stops at start-up and names the line when the file has a mistake, so a setting is never silently ignored. [Configuration →](https://docs.maximem.ai/core/configuration)
 - **A read-only memory browser.** Open `http://127.0.0.1:8000/browser` to see what was stored: memories, entities and your config.
