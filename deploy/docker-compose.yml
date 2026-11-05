@@ -51,7 +51,7 @@ x-synap-image: &synap-image
 
 services:
   secrets:
-    image: redis:7.4.2-alpine@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
+    image: redis:8.10.3-alpine@sha256:21090af93f8324db2f0f0f4f38a7c60369d47d917e000c3423d89d2ae2883537
     restart: "no"
     command:
       - sh
@@ -104,7 +104,7 @@ services:
     logging: *logging
 
   redis:
-    image: redis:7.4.2-alpine@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
+    image: redis:8.10.3-alpine@sha256:21090af93f8324db2f0f0f4f38a7c60369d47d917e000c3423d89d2ae2883537
     restart: unless-stopped
     entrypoint:
       - sh
