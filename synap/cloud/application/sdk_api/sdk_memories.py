@@ -1753,14 +1753,18 @@ def _graph_lifecycle(graph_provider):
 async def _enqueue_graph(session, scope, memory_ids, *, op: str, reason: str,
                          restore_ids: Optional[Dict[str, List[str]]] = None) -> List[str]:
     """Write the graph outbox rows for *memory_ids* with *session*, without
-    committing (the caller commits them with its memory change). [] when the
+    committing (the caller commits them with its memory change). Every caller
+    here applies the rows itself after the commit, so they are written leased
+    to it (``inline=True``) and the drain worker leaves them alone unless that
+    step fails. [] when the
     lifecycle is off or the outbox table does not exist (graph_reconcile is
     then the backstop)."""
     if not _graph_lifecycle_on(scope):
         return []
     from synap.cloud.agents.ingestion.storage import graph_sync_outbox
     return await graph_sync_outbox.enqueue(session, memory_ids=memory_ids, scope=scope,
-                                           op=op, reason=reason, restore_ids=restore_ids)
+                                           op=op, reason=reason, restore_ids=restore_ids,
+                                           inline=True)
 
 
 async def _complete_graph_rows(row_ids: List[str]) -> None:
