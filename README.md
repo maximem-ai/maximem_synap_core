@@ -223,9 +223,12 @@ Synap rewrites what a user said into a short statement about them, so the printe
   Graphs written before this version may still hold lines whose memories were replaced or deleted. Repair them once (it only reports until you add `--commit`):
 
   ```bash
-  docker compose -f deploy/docker-compose.yml exec synap python -m synap.cloud.agents.ingestion.graph_reconcile
-  docker compose -f deploy/docker-compose.yml exec synap python -m synap.cloud.agents.ingestion.graph_reconcile --commit
+  docker compose -f deploy/docker-compose.yml exec synap sh -c '. /state/secrets.env &&
+    export DATABASE_URL="postgresql://synap:$POSTGRES_PASSWORD@postgres:5432/synap" REDIS_URL="redis://:$REDIS_PASSWORD@redis:6379/0" NEO4J_PASSWORD &&
+    python -m synap.cloud.agents.ingestion.graph_reconcile'
   ```
+
+  Run it again with `graph_reconcile --commit` on the last line to apply. The first line loads the database passwords Core generated at first start, the same way the server does; without it the command cannot reach Postgres.
 - **Images.** Synap reads images in a conversation or an upload when the model you configured has vision. [Images →](https://docs.maximem.ai/core/images)
 - **A memory config you write.** One YAML file decides what is remembered and how it is shaped. The server stops at start-up and names the line when the file has a mistake, so a setting is never silently ignored. [Configuration →](https://docs.maximem.ai/core/configuration)
 - **A read-only memory browser.** Open `http://127.0.0.1:8000/browser` to see what was stored: memories, entities and your config.
