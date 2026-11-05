@@ -104,8 +104,11 @@ class GraphRecord:
     ``memory_ids``: ids currently on the record (``memory_ids`` property, or
     the ids of ``memory_contents`` entries in copies mode).
     ``released_memory_ids``: ids the lifecycle service already removed from
-    support (history); they count for "once had support" and for "N is a
-    supporter of this record".
+    support (history). They are never support, even when their memory is
+    alive, but their rows are judged for T2 and T1 exactly like those of
+    ``memory_ids``, they count for "once had support" and for "N is a
+    supporter of this record". Callers pass the two lists as stored; they do
+    not merge them. ``supporters`` must hold the rows of BOTH lists.
     ``is_fixed_entity``: the writer node or the customer node, always Open.
     """
 
@@ -199,23 +202,29 @@ def graph_record_state(
 ) -> GraphRecordState:
     """Decide whether ``record`` is Open or Closed.
 
-    ``supporters`` maps memory id -> its Postgres row. An id of
-    ``record.memory_ids`` that is missing from the mapping is treated as
-    hard-deleted. The function is pure: no I/O, no clock.
+    ``supporters`` maps memory id -> its Postgres row, for the ids of
+    ``record.memory_ids`` and ``record.released_memory_ids``. A missing id is
+    treated as hard-deleted. The function is pure: no I/O, no clock.
     """
     if record.is_fixed_entity:
         return Open(unbacked=not record.memory_ids)
 
-    ids = _dedupe(record.memory_ids)
     released = _dedupe(record.released_memory_ids)
-    all_supporter_ids = set(ids) | set(released)
+    released_set = set(released)
+    # An id in both lists has been released: it is no longer support.
+    ids = tuple(i for i in _dedupe(record.memory_ids) if i not in released_set)
+    all_supporter_ids = set(ids) | released_set
 
     if not ids and not released:
         return Open(unbacked=True)
 
-    rows = [(i, supporters.get(i)) for i in ids]
-    alive_ids = tuple(i for i, r in rows if is_alive(r))
-    current = [(i, r) for i, r in rows if is_current_support(r)]
+    # Support comes only from memory_ids. History (T2, T1 reasons) is judged
+    # over memory_ids AND released_memory_ids: a released id's row (who
+    # superseded it, when) still decides whether the record ended.
+    support_rows = [(i, supporters.get(i)) for i in ids]
+    rows = support_rows + [(i, supporters.get(i)) for i in released]
+    alive_ids = tuple(i for i, r in support_rows if is_alive(r))
+    current = [(i, r) for i, r in support_rows if is_current_support(r)]
     current_ids = tuple(i for i, _ in current)
 
     # T2: a supersession by a non-supporter, with no current support said at
@@ -254,7 +263,8 @@ def graph_record_state(
     if current_ids:
         return Open(alive_memory_ids=alive_ids, current_memory_ids=current_ids)
 
-    # T1: once supported, no current support left.
+    # T1: once supported, no current support left. A released id whose memory
+    # is still alive (an edited memory) is neither support nor a cause.
     not_alive = [(i, r) for i, r in rows if not is_alive(r)]
     if not_alive and all(r is None or r.deleted_at is not None for _, r in not_alive):
         return Closed(rule="T1", reason=REASON_DELETED, alive_memory_ids=alive_ids)
