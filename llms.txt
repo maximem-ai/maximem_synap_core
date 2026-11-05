@@ -4,6 +4,8 @@
 
 Synap Core extracts memories from what users say, resolves the entities they mention, tracks time, and retrieves context with vector and graph search. It runs on your own machine behind one `docker compose up`, keeps data in Docker volumes, and has no login (it is meant to sit behind your own backend). The Python SDK is `maximem-synap` and the JavaScript SDK is `@maximem/synap-js-sdk`; point them at `SYNAP_BASE_URL=http://127.0.0.1:8000` with no API key. Licensed under Apache 2.0.
 
+Accurate mode serves a graph statement only while a live memory supports it. `sdk.memories.delete(id)` accepts a memory id or the id of a graph item from accurate mode (a relationship or entity); for a graph item it deletes that line only and returns `still_asserted_by`, the memories that still say it. Every delete response has `kind`, `graph_released`, `still_present_in` and `fully_removed`. Operators repair graphs written by older versions with `python -m synap.cloud.agents.ingestion.graph_reconcile` (dry run; add `--commit`).
+
 ## Start here
 
 - [README](https://github.com/maximem-ai/maximem_synap_core/blob/main/README.md): what Synap Core is, three ways to run it, the SDK quickstart, Core vs Cloud, and what leaves your machine
