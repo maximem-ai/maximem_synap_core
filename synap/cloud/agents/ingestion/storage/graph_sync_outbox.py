@@ -143,7 +143,7 @@ async def enqueue(session, *, memory_ids: Iterable[Any], scope: Any, op: str, re
                     VALUES (CAST(:id AS uuid), CAST(:memory_id AS uuid), :client_id, :instance_id,
                             :customer_id, :user_id, :scope_level, :namespaces, :op, :reason,
                             CAST(:superseded_by AS uuid), :redact, CAST(:ingestion_id AS uuid),
-                            now() + CAST(:grace AS interval)
+                            now() + make_interval(secs => CAST(:grace AS double precision))
                             {', CAST(:restore AS uuid[])' if with_restore else ''})"""),
             {"id": rid, "memory_id": mid,
              "client_id": str(scope.client_id),
@@ -154,7 +154,7 @@ async def enqueue(session, *, memory_ids: Iterable[Any], scope: Any, op: str, re
              "namespaces": namespaces, "op": op, "reason": reason,
              "superseded_by": _s(superseded_by), "redact": bool(redact),
              "ingestion_id": _s(ingestion_id),
-             "grace": f"{ingestion_grace_seconds() if ingestion_id is not None else 0} seconds",
+             "grace": float(ingestion_grace_seconds() if ingestion_id is not None else 0),
              "restore": [str(x) for x in restore_ids.get(mid, [])]})
         row_ids.append(rid)
     return row_ids
@@ -187,7 +187,7 @@ class PostgresOutboxStore:
         workers never take the same row) and count the attempt."""
         from sqlalchemy import text
         where = ["done_at IS NULL", "(leased_until IS NULL OR leased_until < now())"]
-        params: Dict[str, Any] = {"limit": int(limit), "lease": f"{int(lease_seconds)} seconds"}
+        params: Dict[str, Any] = {"limit": int(limit), "lease": float(lease_seconds)}
         if row_ids is not None:
             where.append("id = ANY(CAST(:row_ids AS uuid[]))")
             params["row_ids"] = [str(r) for r in row_ids]
@@ -202,7 +202,7 @@ class PostgresOutboxStore:
         async with self._session() as session:
             rows = (await session.execute(text(f"""
                 UPDATE {TABLE} SET attempts = attempts + 1,
-                                   leased_until = now() + CAST(:lease AS interval)
+                                   leased_until = now() + make_interval(secs => CAST(:lease AS double precision))
                 WHERE id IN (SELECT id FROM {TABLE} WHERE {' AND '.join(where)}
                              ORDER BY created_at LIMIT :limit FOR UPDATE SKIP LOCKED)
                 RETURNING id, memory_id, client_id, instance_id, customer_id, user_id, scope_level,
@@ -234,10 +234,10 @@ class PostgresOutboxStore:
             return
         async with self._session() as session:
             await session.execute(text(f"""UPDATE {TABLE} SET leased_until = NULL, last_error = :err,
-                                             next_attempt_at = now() + CAST(:wait AS interval)
+                                             next_attempt_at = now() + make_interval(secs => CAST(:wait AS double precision))
                                            WHERE id = ANY(CAST(:ids AS uuid[]))"""),
                                   {"ids": [str(r) for r in row_ids], "err": error[:2000],
-                                   "wait": f"{backoff_seconds(attempts)} seconds"})
+                                   "wait": float(backoff_seconds(attempts))})
             await session.commit()
 
 

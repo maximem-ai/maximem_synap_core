@@ -43,13 +43,13 @@ async def _enqueue(monkeypatch, **kw):
 async def test_ingestion_rows_wait_for_stage4(monkeypatch):
     monkeypatch.delenv("SYNAP_GRAPH_SYNC_INGESTION_GRACE_SECONDS", raising=False)
     sql, params = await _enqueue(monkeypatch, ingestion_id=str(uuid.uuid4()))
-    assert "next_attempt_at" in sql and "now() + CAST(:grace AS interval)" in sql
-    assert params["grace"] == "300 seconds"
+    assert "next_attempt_at" in sql and "now() + make_interval(secs => CAST(:grace AS double precision))" in sql
+    assert params["grace"] == 300.0 and isinstance(params["grace"], float)
 
 
 async def test_rows_without_an_ingestion_are_due_at_once(monkeypatch):
     sql, params = await _enqueue(monkeypatch)
-    assert params["grace"] == "0 seconds"
+    assert params["grace"] == 0.0 and isinstance(params["grace"], float)
 
 
 async def test_stage4_drain_ignores_the_grace(monkeypatch):
