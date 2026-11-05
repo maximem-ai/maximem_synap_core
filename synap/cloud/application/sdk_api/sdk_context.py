@@ -1349,6 +1349,16 @@ def _bundle_item_to_context_item(item, reference=None, as_sent=None, query_order
     custom_category = getattr(item, "custom_category", None)
     if custom_category:
         metadata["custom_category"] = custom_category
+    # Graph items: what kind of graph record ("entity" | "relationship" |
+    # "memory") and the alive memories behind it, so a caller can delete the
+    # memories that assert a statement. Additive, and absent for every
+    # non-graph item, so their shape is unchanged.
+    graph_kind = getattr(item, "graph_kind", None)
+    if graph_kind:
+        metadata["graph_kind"] = graph_kind
+        backing = getattr(item, "backing_memory_ids", None)
+        if backing is not None:
+            metadata["backing_memory_ids"] = [str(m) for m in backing]
 
     # THE SCORE WE RANKED BY, as one opaque number.
     #

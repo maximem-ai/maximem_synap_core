@@ -7,7 +7,7 @@ The Agent (brain) decides WHAT to retrieve, the Manager decides HOW.
 
 from __future__ import annotations
 
-from typing import Dict, Any, List, Mapping, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, Any, Iterable, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 from contextvars import ContextVar
 from dataclasses import replace as _dc_replace
 from dataclasses import dataclass, field
@@ -957,6 +957,167 @@ def record_retrieval_fault(where: str, detail: object, outcome: str = "failed") 
         msg = f"{where} {outcome}: {detail}"
     if msg not in faults:
         faults.append(msg)
+
+
+# --- Graph liveness (accurate-mode graph arm) --------------------------------
+#
+# A graph edge or node only REFERENCES the memories that support it
+# (``memory_ids``, or ``memory_contents`` entries in the legacy copies mode).
+# Postgres says whether each of those memories is still alive. The graph arm
+# asks it, in one query, and serves an entity line, a relationship sentence or
+# a copied memory only while the shared rule (graph_lifecycle_rule) says the
+# record still states something current. Without this, a statement whose only
+# support was superseded or deleted kept being served ("the user works at
+# Acme Corp" after the user resigned).
+#
+# A fault whose text starts with this prefix marks the response degraded and
+# keeps it out of the L1 cache (see _cache_bundle).
+_GRAPH_LIVENESS_FAULT = "graph liveness check"
+_GRAPH_LIVENESS_FLAG = "SYNAP_GRAPH_SERVE_CHECKS_LIVENESS"
+
+
+def _graph_serve_checks_liveness(instance_id: Optional[Any] = None) -> bool:
+    """On by default in Synap Core, off by default elsewhere; the variable
+    (or its ``_INSTANCES`` list) decides when set."""
+    raw = os.environ.get(_GRAPH_LIVENESS_FLAG)
+    if raw is not None and raw.strip():
+        return raw.strip().lower() not in ("0", "false", "no", "off")
+    if os.environ.get(f"{_GRAPH_LIVENESS_FLAG}_INSTANCES", "").strip():
+        from synap.cloud.shared.instance_flags import enabled_for
+        return enabled_for(_GRAPH_LIVENESS_FLAG, instance_id)
+    from synap.cloud.shared import edition
+    return bool(edition.is_core)
+
+
+def _graph_record_memory_ids(props: Optional[Dict[str, Any]]) -> List[str]:
+    """Every memory id a graph record references: ``memory_ids`` plus the
+    ids of legacy ``memory_contents`` entries."""
+    props = props or {}
+    out: List[str] = []
+    raw = props.get("memory_ids")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            raw = [raw]
+    for mid in raw or []:
+        if mid:
+            out.append(str(mid))
+    legacy = props.get("memory_contents")
+    if legacy:
+        try:
+            entries = json.loads(legacy) if isinstance(legacy, str) else legacy
+        except (json.JSONDecodeError, TypeError):
+            entries = []
+        for entry in entries or []:
+            if isinstance(entry, dict) and entry.get("memory_id"):
+                out.append(str(entry["memory_id"]))
+    return out
+
+
+class _GraphLiveness:
+    """The answer to "may this graph record be served?" for one discovery.
+
+    ``checked`` False: the flag is off and every record passes, as before.
+    ``failed`` True: Postgres could not be asked; no entity line, relationship
+    sentence or copied memory passes (their truth is unknown).
+    """
+
+    KINDS = ("entity", "relationship", "memory")
+
+    def __init__(self, checked: bool, rows: Optional[Dict[str, Any]] = None,
+                 failed: bool = False, query_ms: float = 0.0, ids_checked: int = 0):
+        self.checked = checked
+        self.failed = failed
+        self.rows = rows or {}
+        self.query_ms = query_ms
+        self.ids_checked = ids_checked
+        self.dropped_not_alive = {k: 0 for k in self.KINDS}
+        self.dropped_retired = {k: 0 for k in self.KINDS}
+        self.dropped_unchecked = {k: 0 for k in self.KINDS}
+
+    @classmethod
+    async def load(cls, instance_id: Any, nodes: Sequence[Any], edges: Sequence[Any]) -> "_GraphLiveness":
+        if not _graph_serve_checks_liveness(instance_id):
+            return cls(checked=False)
+        ids: List[str] = []
+        for record in list(nodes) + list(edges):
+            ids.extend(_graph_record_memory_ids(getattr(record, "properties", None)))
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            return cls(checked=True)
+        from synap.cloud.shared import memory_liveness
+        _t0 = time.time()
+        try:
+            rows = await memory_liveness.load_supporter_rows(ids)
+        except Exception as e:  # noqa: BLE001 - reported as a fault, never swallowed silently
+            logger.warning(
+                "graph_liveness_query_failed: instance_id=%s ids=%d error=%s: %s",
+                instance_id, len(ids), type(e).__name__, e,
+            )
+            record_retrieval_fault(
+                _GRAPH_LIVENESS_FAULT,
+                "memory states could not be read, so no graph statements were returned",
+            )
+            return cls(checked=True, failed=True, ids_checked=len(ids),
+                       query_ms=(time.time() - _t0) * 1000)
+        return cls(checked=True, rows=rows, ids_checked=len(ids),
+                   query_ms=(time.time() - _t0) * 1000)
+
+    def memory_alive(self, memory_id: str) -> bool:
+        """Kind C/D: one memory. True when unchecked."""
+        if not self.checked:
+            return True
+        if self.failed:
+            return False
+        from synap.cloud.shared.memory_liveness import is_alive
+        return is_alive(self.rows.get(str(memory_id)))
+
+    def collect_dead(self, ids: Iterable[str]) -> set:
+        if not self.checked or self.failed:
+            return set()
+        from synap.cloud.shared.memory_liveness import is_alive
+        return {i for i in ids if not is_alive(self.rows.get(str(i)))}
+
+    def record_ok(self, kind: str, props: Optional[Dict[str, Any]],
+                  fixed: bool = False) -> Tuple[bool, Optional[List[str]]]:
+        """Kind A/B: (serve?, alive backing memory ids or None when unchecked)."""
+        if not self.checked:
+            return True, None
+        if self.failed:
+            self.dropped_unchecked[kind] += 1
+            return False, None
+        props = props or {}
+        if props.get("retired_at") and not fixed:
+            self.dropped_retired[kind] += 1
+            return False, None
+        from synap.cloud.agents.ingestion.services.graph_lifecycle_rule import (
+            GraphRecord, graph_record_state,
+        )
+        released = props.get("released_memory_ids") or []
+        state = graph_record_state(
+            GraphRecord(
+                memory_ids=_graph_record_memory_ids(props),
+                released_memory_ids=[str(x) for x in released if x],
+                is_fixed_entity=fixed,
+            ),
+            self.rows,
+        )
+        if not state.is_open:
+            self.dropped_not_alive[kind] += 1
+            return False, None
+        return True, list(state.alive_memory_ids)
+
+    def log(self, instance_id: Any) -> None:
+        if not self.checked:
+            return
+        logger.info(
+            "graph_liveness: instance_id=%s ids_checked=%d failed=%s graph_liveness_query_ms=%.1f "
+            "graph_items_dropped_not_alive=%s graph_items_dropped_retired=%s "
+            "graph_items_dropped_unchecked=%s",
+            instance_id, self.ids_checked, self.failed, self.query_ms,
+            self.dropped_not_alive, self.dropped_retired, self.dropped_unchecked,
+        )
 
 
 def _jaccard_similarity_sets(set_a: frozenset, set_b: frozenset) -> float:
@@ -7243,6 +7404,8 @@ class RetrievalManager:
                 valid_until=_safe_parse_datetime(meta.get("valid_until")),
                 temporal_category=meta.get("temporal_category"),
                 temporal_confidence=float(meta.get("temporal_confidence") or 0.0),
+                graph_kind="memory",
+                backing_memory_ids=[doc.id],
             )))
         return out
 
@@ -7443,6 +7606,12 @@ class RetrievalManager:
             if not discovered_nodes:
                 return []
 
+            # Ask Postgres, once, whether the memories behind every discovered
+            # record are alive (SYNAP_GRAPH_SERVE_CHECKS_LIVENESS). Records
+            # whose support is gone are not served below.
+            _liveness = await _GraphLiveness.load(
+                scope.instance_id, discovered_nodes, [_e for _e, _g in discovered_edges])
+
             # 2. Score discovered nodes using stored embeddings
             # Compute average query vector for scoring
             if query_vectors:
@@ -7482,6 +7651,11 @@ class RetrievalManager:
 
                 if similarity < 0.25:
                     continue
+                from synap.cloud.agents.ingestion.services.writer_entity import is_fixed as _is_fixed
+                _node_ok, _node_backing = _liveness.record_ok(
+                    "entity", node.properties, fixed=_is_fixed(node))
+                if not _node_ok:
+                    continue
                 _own(node.properties.get("entity_id", node.id), node_vec)
 
                 name = node.properties.get("canonical_name") or node.properties.get("name", "")
@@ -7508,6 +7682,8 @@ class RetrievalManager:
                     valid_until=_safe_parse_datetime(node.properties.get("valid_until")),
                     temporal_category=node.properties.get("temporal_category"),
                     temporal_confidence=float(node.properties.get("temporal_confidence", 0)) if node.properties.get("temporal_confidence") is not None else 0.0,
+                    graph_kind="entity",
+                    backing_memory_ids=_node_backing,
                 ))
 
             # 2b. The relationships themselves, as lines of text
@@ -7534,6 +7710,12 @@ class RetrievalManager:
                     if _a is None or _b is None or _emb is None or _edge.id in _served_edges:
                         continue
                     if _gate is not None and not _gate(_props):
+                        continue
+                    # A closed relationship is neither served nor allowed to
+                    # exempt its memories from the cut below.
+                    _edge_ok, _edge_backing = _liveness.record_ok("relationship", _props)
+                    if not _edge_ok:
+                        _served_edges.add(_edge.id)
                         continue
                     _vec = np.array(_emb, dtype=np.float32)
                     _vec = _vec / (np.linalg.norm(_vec) + 1e-9)
@@ -7564,6 +7746,8 @@ class RetrievalManager:
                         confidence=_conf,
                         scope=derive_item_scope(user_id=_props.get("user_id"),
                                                 customer_id=_props.get("customer_id")),
+                        graph_kind="relationship",
+                        backing_memory_ids=_edge_backing,
                     ))
 
             def _edge_is_critical(_e) -> bool:
@@ -7663,6 +7847,16 @@ class RetrievalManager:
                     if _is_true(mem.get("is_deleted")):
                         continue
 
+                    # The copy on the edge says nothing about whether the
+                    # memory was since superseded (`is_current` is never kept
+                    # up to date); Postgres does.
+                    if not _liveness.memory_alive(memory_id):
+                        if _liveness.failed:
+                            _liveness.dropped_unchecked["memory"] += 1
+                        else:
+                            _liveness.dropped_not_alive["memory"] += 1
+                        continue
+
                     seen_memory_ids.add(memory_id)
 
                     # Per-memory scoring: use stored embedding if available,
@@ -7697,6 +7891,8 @@ class RetrievalManager:
                             valid_until=_safe_parse_datetime(mem.get("valid_until")),
                             temporal_category=mem.get("temporal_category"),
                             temporal_confidence=float(mem.get("temporal_confidence", 0)) if mem.get("temporal_confidence") is not None else 0.0,
+                            graph_kind="memory",
+                            backing_memory_ids=[memory_id],
                         ),
                         _has_own_emb,
                         _mem_type,
@@ -7712,8 +7908,13 @@ class RetrievalManager:
                 for _mid in (_e.properties or {}).get(_refs.PROPERTY) or []
             }
             _referenced = bool(_refs.enabled(scope.instance_id) or _refs.edges_enabled(scope.instance_id))
+            # Memories Postgres says are not alive are not even fetched.
+            _dead_refs = _liveness.collect_dead(
+                _mid for _rec in list(discovered_nodes) + [_e for _e, _g in discovered_edges]
+                for _mid in ((_rec.properties or {}).get(_refs.PROPERTY) or [])
+            )
             for _sim, _item in await self._node_referenced_memories(
-                scope, discovered_nodes, seen_memory_ids, avg_query, _traversal_gates[0], _own,
+                scope, discovered_nodes, seen_memory_ids | _dead_refs, avg_query, _traversal_gates[0], _own,
                 edges=[_e for _e, _g in discovered_edges],
             ):
                 seen_memory_ids.add(_item.item_id)
@@ -7726,6 +7927,8 @@ class RetrievalManager:
             # risk / dependency / test / supersession) always survive the cut — the
             # relationship signals decision-relevance even when the memory text isn't
             # query-similar (e.g. a failing test that blocks an in-progress task).
+            _liveness.log(scope.instance_id)
+
             _all_scored_memories.sort(key=lambda x: x[0], reverse=True)
             _total_candidates = len(_all_scored_memories)
             _keep_count = max(5, int(_total_candidates * 0.70))
@@ -9575,7 +9778,8 @@ class RetrievalManager:
         # a fetch that read less because the visibility policy was unknown would
         # otherwise be remembered, under this instance's key, for the full TTL.
         if any(
-            f.startswith("visibility policy") for f in (_RETRIEVAL_FAULTS.get() or [])
+            f.startswith(("visibility policy", _GRAPH_LIVENESS_FAULT))
+            for f in (_RETRIEVAL_FAULTS.get() or [])
         ):
             degraded = True
         if item_count == 0 or degraded:
