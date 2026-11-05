@@ -311,7 +311,7 @@ class StorageCoordinator:
                 drain_for_ingestion = None
             if drain_for_ingestion is not None:
                 try:
-                    await drain_for_ingestion(ingestion_id, graph=self._graph)
+                    await drain_for_ingestion(ingestion_id, graph=self._graph, vector=self._vector)
                 except Exception as e:  # noqa: BLE001 - the worker retries
                     logger.warning("Graph outbox drain failed ingestion_id=%s: %s",
                                    ingestion_id, e)

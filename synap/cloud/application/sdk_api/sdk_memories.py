@@ -1376,6 +1376,14 @@ async def update_memory(
         params,
     )
 
+    # The old graph support is owed a release (reason "updated"): its outbox
+    # row goes in the same transaction as the new text, then commit, so the
+    # graph step runs only on a committed edit and a failed one is retried.
+    graph_rows = await _enqueue_graph(
+        session, _scope_of_stored_row(auth, client_uuid, existing_row), [memory_id],
+        op="retire", reason="updated")
+    await session.commit()
+
     # Vector re-embedding and graph update, from the row's OWN ids.
     #
     # The same defect the delete path had, and quieter. `_resolve_scope` maps
@@ -1428,6 +1436,7 @@ async def update_memory(
             # index at once.
             await _graph_lifecycle(graph_provider).release(
                 scope, [memory_id], mode="retire", reason="updated")
+            await _complete_graph_rows(graph_rows)
         elif graph_provider:
             await graph_provider.update_memory_on_edges(
                 memory_id=memory_id,
@@ -1538,9 +1547,14 @@ async def delete_memory(
         """),
         {"memory_id": memory_id, "client_id": client_uuid},
     )
-    # Commit the delete before touching other stores. The graph erase cannot
-    # be undone; a Postgres rollback after it would leave a live memory whose
-    # graph support is gone.
+    # The graph erase is owed from this moment: its outbox row is written in
+    # the same transaction as the delete, so a failed or interrupted graph step
+    # is retried by the drain worker. Then commit before touching other
+    # stores: the graph erase cannot be undone, and a Postgres rollback after
+    # it would leave a live memory whose graph support is gone.
+    scope_for_graph = _scope_of_stored_row(auth, client_uuid, existing_row)
+    graph_rows = await _enqueue_graph(session, scope_for_graph, [memory_id],
+                                      op="erase", reason="deleted")
     await session.commit()
 
     # Vector and graph cleanup, from the row's OWN ids.
@@ -1664,6 +1678,7 @@ async def delete_memory(
                 result = await _graph_lifecycle(graph_provider).release(
                     scope, [memory_id], mode="erase", reason="deleted")
                 graph_released = _graph_released(result)
+                await _complete_graph_rows(graph_rows)
             else:
                 await graph_provider.soft_delete_memory_from_edges(
                     memory_id=memory_id,
@@ -1673,7 +1688,8 @@ async def delete_memory(
             still_present_in.append("graph")
             logger.error(
                 "Graph cleanup FAILED for memory %s: the row is deleted but its "
-                "edges remain until graph_reconcile releases them: %s", memory_id, e,
+                "edges remain until the graph outbox worker retries (pending rows: %d): %s",
+                memory_id, len(graph_rows), e,
             )
 
     # A cached bundle may still hold the deleted text for up to the cache TTL.
@@ -1708,6 +1724,30 @@ def _graph_lifecycle(graph_provider):
     # The vector store too: erasing an edge or node also deletes its triple
     # and entity vectors (a copy of the fact).
     return GraphLifecycle(graph_provider, vector=get_cached_providers().get("vector"))
+
+
+async def _enqueue_graph(session, scope, memory_ids, *, op: str, reason: str) -> List[str]:
+    """Write the graph outbox rows for *memory_ids* with *session*, without
+    committing (the caller commits them with its memory change). [] when the
+    lifecycle is off or the outbox table does not exist (graph_reconcile is
+    then the backstop)."""
+    if not _graph_lifecycle_on(scope):
+        return []
+    from synap.cloud.agents.ingestion.storage import graph_sync_outbox
+    return await graph_sync_outbox.enqueue(session, memory_ids=memory_ids, scope=scope,
+                                           op=op, reason=reason)
+
+
+async def _complete_graph_rows(row_ids: List[str]) -> None:
+    """Mark outbox rows done after the inline graph step succeeded. A failure
+    here only means the worker applies the (idempotent) release again."""
+    if not row_ids:
+        return
+    try:
+        from synap.cloud.agents.ingestion.storage.graph_sync_outbox import PostgresOutboxStore
+        await PostgresOutboxStore().complete(list(row_ids))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("graph outbox rows not marked done (the worker re-applies them): %s", e)
 
 
 def _graph_released(result) -> Optional[GraphReleased]:
