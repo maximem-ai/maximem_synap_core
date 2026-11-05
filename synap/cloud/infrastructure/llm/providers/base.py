@@ -17,6 +17,37 @@ from synap.cloud.infrastructure.llm.models import (
 )
 
 
+
+def _seconds_from_env(name: str, default: Optional[float]) -> Optional[float]:
+    """Seconds from an env var. 'none', 'off' or '0' means no limit (None).
+
+    Anything else that is not a positive number stops start-up with a message
+    naming the variable, so a typo is never silently replaced by a default.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    value = raw.strip().lower()
+    if value in ("none", "off", "0"):
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise ValueError(f"{name} must be a number of seconds or 'none', got {raw!r}") from None
+    if seconds < 0:
+        raise ValueError(f"{name} must not be negative, got {raw!r}")
+    return seconds
+
+
+def llm_http_timeout() -> httpx.Timeout:
+    """Timeouts for every LLM HTTP call: connect 10 s, read/write bounded, pool unbounded."""
+    return httpx.Timeout(
+        connect=10.0,
+        read=_seconds_from_env("SYNAP_LLM_READ_TIMEOUT_SECONDS", 300.0),
+        write=_seconds_from_env("SYNAP_LLM_WRITE_TIMEOUT_SECONDS", 60.0),
+        pool=None,
+    )
+
 class ILLMProvider(ABC):
     """
     Abstract interface for LLM providers.
@@ -185,12 +216,14 @@ class BaseLLMProvider(ILLMProvider):
             self._key_rotator = None
             self.api_key = api_key
 
-        # Shared HTTP client with connection pooling (avoids TCP+TLS per request)
-        # No read timeout — LLM calls can take minutes for large prompts;
-        # a hard timeout causes ProviderError cascades that poison the
-        # availability tracker.  Connect timeout kept at 10s.
+        # Shared HTTP client with connection pooling (avoids TCP+TLS per request).
+        # Read timeout is bounded (default 300 s, SYNAP_LLM_READ_TIMEOUT_SECONDS):
+        # LLM calls can take minutes for large prompts, but a request that never
+        # answers must not hold an ingestion worker forever. A timeout raises
+        # ProviderTimeoutError, which the manager does NOT count toward model
+        # availability, so slow calls cannot take the model offline.
         self._http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(None, connect=10.0),
+            timeout=llm_http_timeout(),
             limits=httpx.Limits(
                 max_connections=int(os.environ.get("LLM_MAX_CONNECTIONS", "50")),
                 max_keepalive_connections=int(os.environ.get("LLM_MAX_KEEPALIVE_CONNECTIONS", "20")),

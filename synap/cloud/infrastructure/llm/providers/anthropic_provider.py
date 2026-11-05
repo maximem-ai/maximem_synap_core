@@ -17,6 +17,7 @@ from synap.cloud.infrastructure.llm.models import (
     ModelType,
     RateLimits,
     ProviderError,
+    ProviderTimeoutError,
     RateLimitError
 )
 from .base import BaseLLMProvider
@@ -219,10 +220,11 @@ class AnthropicProvider(BaseLLMProvider):
 
             data = response.json()
 
-        except httpx.TimeoutException:
-            if self._key_rotator:
-                self._key_rotator.record_failure(api_key, "timeout")
-            raise ProviderError("Request timeout", "anthropic", 408)
+        except httpx.TimeoutException as e:
+            # A slow or stuck request says nothing about the key or the model:
+            # do not mark the key unhealthy, and raise the timeout type the
+            # manager keeps out of the availability tracker.
+            raise ProviderTimeoutError("anthropic", type(e).__name__) from e
         except httpx.RequestError as e:
             if self._key_rotator:
                 self._key_rotator.record_failure(api_key, str(e))
@@ -299,36 +301,40 @@ class AnthropicProvider(BaseLLMProvider):
 
         self._note_request(kwargs, payload)
 
-        async with self._http_client.stream(
-            "POST",
-            f"{self.base_url}/messages",
-            headers=headers,
-            json=payload,
-        ) as response:
-            if response.status_code == 429:
-                raise RateLimitError("anthropic")
+        try:
+            async with self._http_client.stream(
+                "POST",
+                f"{self.base_url}/messages",
+                headers=headers,
+                json=payload,
+            ) as response:
+                if response.status_code == 429:
+                    raise RateLimitError("anthropic")
 
-            if response.status_code >= 400:
-                error_text = await response.aread()
-                raise ProviderError(error_text.decode(), "anthropic", response.status_code)
+                if response.status_code >= 400:
+                    error_text = await response.aread()
+                    raise ProviderError(error_text.decode(), "anthropic", response.status_code)
 
-            async for line in response.aiter_lines():
-                if line.startswith("data: "):
-                    data = _json.loads(line[6:])
-                    event_type = data.get("type")
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data = _json.loads(line[6:])
+                        event_type = data.get("type")
 
-                    if event_type == "message_start" and _usage_sink is not None:
-                        usage = data.get("message", {}).get("usage", {})
-                        _usage_sink["input_tokens"] = usage.get("input_tokens", 0)
+                        if event_type == "message_start" and _usage_sink is not None:
+                            usage = data.get("message", {}).get("usage", {})
+                            _usage_sink["input_tokens"] = usage.get("input_tokens", 0)
 
-                    elif event_type == "message_delta" and _usage_sink is not None:
-                        usage = data.get("usage", {})
-                        _usage_sink["output_tokens"] = usage.get("output_tokens", 0)
+                        elif event_type == "message_delta" and _usage_sink is not None:
+                            usage = data.get("usage", {})
+                            _usage_sink["output_tokens"] = usage.get("output_tokens", 0)
 
-                    elif event_type == "content_block_delta":
-                        delta = data.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            yield delta.get("text", "")
+                        elif event_type == "content_block_delta":
+                            delta = data.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                yield delta.get("text", "")
+        except httpx.TimeoutException as e:
+            # Not counted toward model availability: see ProviderTimeoutError.
+            raise ProviderTimeoutError("anthropic", type(e).__name__) from e
 
     def _convert_tools(self, tools: List[Dict]) -> List[Dict]:
         """Convert OpenAI tool format to Anthropic format."""

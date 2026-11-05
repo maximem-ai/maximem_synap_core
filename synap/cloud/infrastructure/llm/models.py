@@ -325,6 +325,19 @@ class ProviderError(LLMError):
         self.status_code = status_code
 
 
+class ProviderTimeoutError(ProviderError):
+    """The provider did not answer within the configured time limit.
+
+    Kept apart from ProviderError on purpose: a request that is slow or stuck is
+    not evidence that the model is down, so it must not count toward the error
+    counter that marks a model unavailable (tracker.record_error), nor mark an
+    API key unhealthy. The call still fails, so the caller's retry runs.
+    """
+    def __init__(self, provider: str, phase: str = "read"):
+        super().__init__(f"Request timeout ({phase})", provider, 408)
+        self.phase = phase
+
+
 class RateLimitError(ProviderError):
     """Rate limit exceeded."""
     def __init__(self, provider: str, retry_after: Optional[int] = None):
