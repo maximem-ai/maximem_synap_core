@@ -136,7 +136,12 @@ async def reconcile_namespace(provider, namespace: str, *, commit: bool,
         if r.get("is_fixed_entity"):
             continue
         state = graph_record_state(
-            GraphRecord(memory_ids=list(dict.fromkeys(mem + released)),
+            # TEMPORARY until G1's rule reads released ids itself (lead
+            # decision, CONTRACT_GRAPH.md): released ids count only when their
+            # memory is not alive, the same as GraphLifecycle._apply. An edited
+            # memory (alive, released as "updated") is no longer support.
+            GraphRecord(memory_ids=list(dict.fromkeys(
+                mem + [i for i in released if i not in mem and not is_alive(rows.get(i))])),
                         released_memory_ids=released,
                         is_fixed_entity=bool(r.get("is_fixed_entity"))),
             rows)
