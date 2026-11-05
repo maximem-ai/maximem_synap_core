@@ -261,3 +261,44 @@ async def test_graph_id_delete_refused_when_service_cannot_limit_namespaces(wire
             await sdk_memories.delete_memory(str(uuid.uuid4()), _auth(), FakeSession(None))
     finally:
         m._graph_lifecycle = orig
+
+
+async def test_real_service_erases_only_in_the_callers_write_graph(wired, monkeypatch):
+    """With the real GraphLifecycle (fake adapter): a user reaches its own edge,
+    never the same id in the customer's shared graph."""
+    from synap.cloud.agents.ingestion.storage.graph_lifecycle import GraphLifecycle
+
+    monkeypatch.setenv("SYNAP_GRAPH_PER_SCOPE", "true")
+    client, customer, user = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    user_scope = SimpleNamespace(client_id=client, instance_id="inst_x", customer_id=customer,
+                                 user_id=user, scope_level="user", chain=None)
+
+    async def resolve(auth, user_id, customer_id, scope_path=None):
+        return user_scope
+
+    class Adapter:
+        def __init__(self, holder_ns):
+            self.holder_ns, self.asked = holder_ns, []
+
+        def erase_records(self, ns, edge_ids, node_ids):
+            self.asked.append(ns)
+            if ns != self.holder_ns:
+                return {"records": [], "deleted_edges": [], "deleted_nodes": []}
+            return {"records": [{"kind": "edge", "id": edge_ids[0], "memory_ids": []}],
+                    "deleted_edges": [{"id": edge_ids[0]}], "deleted_nodes": []}
+
+    monkeypatch.setattr(sdk_memories, "_resolve_scope", resolve)
+    from fastapi import HTTPException
+
+    shared = Adapter(str(customer))
+    monkeypatch.setattr(sdk_memories, "_graph_lifecycle", lambda g: GraphLifecycle(shared))
+    with pytest.raises(HTTPException) as err:
+        await sdk_memories.delete_memory(str(uuid.uuid4()), _auth(), FakeSession(None),
+                                         customer_id="acme", user_id="u1")
+    assert err.value.status_code == 404 and shared.asked == [str(user)]
+
+    own = Adapter(str(user))
+    monkeypatch.setattr(sdk_memories, "_graph_lifecycle", lambda g: GraphLifecycle(own))
+    answer = await sdk_memories.delete_memory(str(uuid.uuid4()), _auth(), FakeSession(None),
+                                              customer_id="acme", user_id="u1")
+    assert answer.kind == "relationship" and answer.graph_released.edges_deleted == 1
