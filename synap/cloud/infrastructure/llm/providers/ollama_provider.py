@@ -32,7 +32,7 @@ from synap.cloud.infrastructure.llm.models import (
     ProviderTimeoutError,
     RateLimits,
 )
-from .base import BaseLLMProvider
+from .base import BaseLLMProvider, SLOW_ANSWER_TIMEOUTS as _SLOW_ANSWER
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +153,7 @@ class OllamaProvider(BaseLLMProvider):
         start = time.time()
         try:
             response = await self._http_client.post(f"{self.base_url}/api/chat", json=payload)
-        except httpx.TimeoutException as e:
+        except _SLOW_ANSWER as e:
             raise ProviderTimeoutError("ollama", type(e).__name__) from e
         except httpx.RequestError as e:
             raise self._unreachable(e)
@@ -204,7 +204,7 @@ class OllamaProvider(BaseLLMProvider):
                     if chunk.get("done") and _usage_sink is not None:
                         _usage_sink["input_tokens"] = chunk.get("prompt_eval_count", 0) or 0
                         _usage_sink["output_tokens"] = chunk.get("eval_count", 0) or 0
-        except httpx.TimeoutException as e:
+        except _SLOW_ANSWER as e:
             raise ProviderTimeoutError("ollama", type(e).__name__) from e
         except httpx.RequestError as e:
             raise self._unreachable(e)
