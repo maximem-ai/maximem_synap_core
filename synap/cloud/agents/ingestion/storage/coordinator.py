@@ -214,7 +214,7 @@ class StorageCoordinator:
     # ------------------------------------------------------------------
 
     def _lifecycle(self):
-        if self._graph_lifecycle is None and self._graph is not None:
+        if getattr(self, "_graph_lifecycle", None) is None and getattr(self, "_graph", None) is not None:
             from .graph_lifecycle import GraphLifecycle
             # vector: erasing a record also deletes its triple/entity vectors.
             self._graph_lifecycle = GraphLifecycle(self._graph, vector=self._vector)
@@ -231,7 +231,8 @@ class StorageCoordinator:
         by the drain worker.
         """
         lifecycle_on = graph_lifecycle_enabled(kwargs.get("scope"))
-        if lifecycle_on and self._retire_accepts_enqueue is None:
+        # getattr: a coordinator built with __new__ (tests, tools) has no __init__ state.
+        if lifecycle_on and getattr(self, "_retire_accepts_enqueue", None) is None:
             import inspect
             try:
                 params = inspect.signature(self._rdbms.retire_memory_with_audit).parameters
@@ -240,7 +241,7 @@ class StorageCoordinator:
                     or any(p.kind == p.VAR_KEYWORD for p in params.values()))
             except (TypeError, ValueError):
                 self._retire_accepts_enqueue = False
-        if lifecycle_on and self._retire_accepts_enqueue:
+        if lifecycle_on and getattr(self, "_retire_accepts_enqueue", False):
             kwargs["enqueue_graph"] = True
         updated = await self._rdbms.retire_memory_with_audit(**kwargs)
         require_retire = kwargs.get("require_retire", True)
@@ -261,8 +262,10 @@ class StorageCoordinator:
 
     def _queue_graph_release(self, *, scope, ingestion_id, memory_id, mode, reason,
                              superseded_by=None) -> None:
-        if self._graph is None and self._graph_lifecycle is None:
+        if getattr(self, "_graph", None) is None and getattr(self, "_graph_lifecycle", None) is None:
             return
+        if not hasattr(self, "_pending_graph_releases"):
+            self._pending_graph_releases = {}
         key = str(ingestion_id) if ingestion_id is not None else ""
         self._pending_graph_releases.setdefault(key, []).append(PendingGraphRelease(
             scope=scope, memory_id=str(memory_id), mode=mode, reason=reason,
@@ -271,7 +274,7 @@ class StorageCoordinator:
 
     def pending_graph_releases(self, ingestion_id: Optional[Any] = None) -> List["PendingGraphRelease"]:
         key = str(ingestion_id) if ingestion_id is not None else ""
-        return list(self._pending_graph_releases.get(key, []))
+        return list(getattr(self, "_pending_graph_releases", {}).get(key, []))
 
     async def release_pending_graph(self, ingestion_id: Optional[Any] = None) -> int:
         """Apply the graph releases this ingestion's retirements owe.
@@ -284,7 +287,7 @@ class StorageCoordinator:
         Returns the number of memories released.
         """
         key = str(ingestion_id) if ingestion_id is not None else ""
-        pending = self._pending_graph_releases.pop(key, [])
+        pending = getattr(self, "_pending_graph_releases", {}).pop(key, [])
         released = 0
         clients = set()
         if pending:
