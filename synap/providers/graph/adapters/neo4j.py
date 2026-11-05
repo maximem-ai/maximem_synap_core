@@ -1007,6 +1007,9 @@ class Neo4jAdapter(GraphStoreInterface):
                 for e in edges:
                     if e["deleted"]:
                         candidates.update((e["from_id"], e["to_id"]))
+                # An endpoint another transaction deleted between our MATCH and
+                # our write lock reads back as null: nothing to clean up there.
+                candidates.discard(None)
                 if candidates:
                     orphans = [r.data() for r in tx.run(
                         _DELETE_ORPHANS, {"ns": namespace, "candidates": sorted(candidates)})]
@@ -1063,6 +1066,7 @@ class Neo4jAdapter(GraphStoreInterface):
             for e in edges:
                 candidates.update((e["from_id"], e["to_id"]))
             candidates -= set(params["node_ids"])
+            candidates.discard(None)
             orphans = []
             if candidates:
                 orphans = [r.data() for r in tx.run(

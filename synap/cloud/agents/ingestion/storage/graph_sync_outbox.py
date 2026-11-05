@@ -103,7 +103,8 @@ async def superseded_by_any(session, memory_ids: List[str]) -> Dict[str, List[st
 async def enqueue(session, *, memory_ids: Iterable[Any], scope: Any, op: str, reason: str,
                   superseded_by: Optional[Any] = None, redact: bool = False,
                   ingestion_id: Optional[Any] = None,
-                  restore_ids: Optional[Dict[str, List[str]]] = None) -> List[str]:
+                  restore_ids: Optional[Dict[str, List[str]]] = None,
+                  inline: bool = False) -> List[str]:
     """Insert one pending row per memory with *session*, WITHOUT committing:
     the caller commits it together with the memory change. Returns the row ids
     ([] when the table does not exist).
@@ -112,7 +113,13 @@ async def enqueue(session, *, memory_ids: Iterable[Any], scope: Any, op: str, re
     superseded (``restore_memory_ids``), so the graph can restore them once
     the delete clears their ``superseded_by``. *restore_ids* ({N: [S]}) is
     used when given; otherwise they are read here, so call this BEFORE the
-    delete statement."""
+    delete statement.
+
+    *inline*: the caller applies these rows itself right after its commit
+    (then marks them done). The rows are written already leased to it for
+    LEASE_SECONDS, so the drain worker does not apply the same release at the
+    same time; if the caller fails or dies, the lease runs out and the worker
+    takes the row."""
     if op not in OPS:
         raise ValueError(f"op must be one of {OPS}, not {op!r}")
     ids = [str(m) for m in dict.fromkeys(memory_ids or []) if m]
@@ -138,12 +145,15 @@ async def enqueue(session, *, memory_ids: Iterable[Any], scope: Any, op: str, re
         await session.execute(
             text(f"""INSERT INTO {TABLE} (
                         id, memory_id, client_id, instance_id, customer_id, user_id, scope_level,
-                        namespaces, op, reason, superseded_by, redact, ingestion_id, next_attempt_at
+                        namespaces, op, reason, superseded_by, redact, ingestion_id, next_attempt_at,
+                        leased_until
                         {', restore_memory_ids' if with_restore else ''})
                     VALUES (CAST(:id AS uuid), CAST(:memory_id AS uuid), :client_id, :instance_id,
                             :customer_id, :user_id, :scope_level, :namespaces, :op, :reason,
                             CAST(:superseded_by AS uuid), :redact, CAST(:ingestion_id AS uuid),
-                            now() + make_interval(secs => CAST(:grace AS double precision))
+                            now() + make_interval(secs => CAST(:grace AS double precision)),
+                            CASE WHEN CAST(:inline AS boolean) THEN now() + make_interval(secs => CAST(:lease AS double precision))
+                                 ELSE NULL END
                             {', CAST(:restore AS uuid[])' if with_restore else ''})"""),
             {"id": rid, "memory_id": mid,
              "client_id": str(scope.client_id),
@@ -155,6 +165,7 @@ async def enqueue(session, *, memory_ids: Iterable[Any], scope: Any, op: str, re
              "superseded_by": _s(superseded_by), "redact": bool(redact),
              "ingestion_id": _s(ingestion_id),
              "grace": float(ingestion_grace_seconds() if ingestion_id is not None else 0),
+             "inline": bool(inline), "lease": float(LEASE_SECONDS),
              "restore": [str(x) for x in restore_ids.get(mid, [])]})
         row_ids.append(rid)
     return row_ids

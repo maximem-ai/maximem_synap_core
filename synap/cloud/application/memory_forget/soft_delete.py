@@ -125,7 +125,8 @@ async def soft_delete_memories(
     graph_rows: List[str] = []
     if graph is not None and graph_lifecycle_on(scope):
         graph_rows = await enqueue_graph(session, memory_ids=marked, scope=scope,
-                                         op="erase", reason="deleted", redact=True)
+                                         op="erase", reason="deleted", redact=True,
+                                         inline=True)
     await session.commit()
 
     if vector is not None:
