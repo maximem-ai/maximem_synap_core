@@ -99,6 +99,197 @@ def _is_schema_already_exists(exc: BaseException) -> bool:
     return "EquivalentSchemaRuleAlreadyExists" in str(exc)
 
 
+
+# --- Lifecycle Cypher (release_memory_ids, set_record_states, erase_records) ---
+
+# The writer's and the customer's node: keyed on an id, never retired or deleted
+# by the lifecycle (services/writer_entity.is_fixed). Neo4j may hold the flag as
+# a boolean or as its string, so both are read.
+_FIXED = ("(coalesce(toString({v}.is_writer), '') IN ['true', 'True'] "
+          "OR coalesce(toString({v}.is_customer), '') IN ['true', 'True'])")
+
+# What an id release does to one record, shared by edges and nodes: the ids go
+# from `memory_ids` to `released_memory_ids` (no duplicates, newest $cap kept),
+# and a record left with none is retired. The first retirement wins: a record
+# already retired keeps its reason and date.
+_RELEASE_EDGES = """
+MATCH (a:SynapNode {_namespace: $ns})-[r]->(b:SynapNode)
+WHERE r._namespace = $ns AND any(x IN coalesce(r.memory_ids, []) WHERE x IN $ids)
+WITH a, b, r, [x IN r.memory_ids WHERE NOT x IN $ids] AS kept,
+     [x IN r.memory_ids WHERE x IN $ids] AS gone, coalesce(r.released_memory_ids, []) AS prev
+WITH a, b, r, kept, prev + [x IN gone WHERE NOT x IN prev] AS rel
+WITH a, b, r, kept, size(kept) = 0 AS unsupported,
+     CASE WHEN size(rel) > $cap THEN rel[size(rel) - $cap..] ELSE rel END AS released
+WITH a, b, r, kept, unsupported, released, unsupported AND r.retired_at IS NULL AS newly
+SET r.memory_ids = kept,
+    r.released_memory_ids = released,
+    r.retired_at = CASE WHEN newly THEN $now ELSE r.retired_at END,
+    r.retired_reason = CASE WHEN newly THEN $reason ELSE r.retired_reason END,
+    r.retired_by_memory_id = CASE WHEN newly THEN $by ELSE r.retired_by_memory_id END
+WITH a, b, r, kept, unsupported, released, newly, r.id AS rid, type(r) AS rtype,
+     $erase AND unsupported AS erased
+FOREACH (_ IN CASE WHEN erased THEN [1] ELSE [] END | DELETE r)
+RETURN rid AS id, rtype AS type, kept AS memory_ids, released AS released_memory_ids,
+       unsupported, newly, erased AS deleted,
+       a.id AS from_id, a.canonical_name AS from_name, a.entity_type AS from_type,
+       a.er_vector_name AS from_vector_name,
+       b.id AS to_id, b.canonical_name AS to_name, b.entity_type AS to_type,
+       b.er_vector_name AS to_vector_name
+"""
+
+_RELEASE_NODES = """
+MATCH (n:SynapNode {_namespace: $ns})
+WHERE any(x IN coalesce(n.memory_ids, []) WHERE x IN $ids)
+WITH n, [x IN n.memory_ids WHERE NOT x IN $ids] AS kept,
+     [x IN n.memory_ids WHERE x IN $ids] AS gone, coalesce(n.released_memory_ids, []) AS prev,
+     %s AS fixed
+WITH n, kept, fixed, prev + [x IN gone WHERE NOT x IN prev] AS rel
+WITH n, kept, fixed, size(kept) = 0 AND NOT fixed AS unsupported,
+     CASE WHEN size(rel) > $cap THEN rel[size(rel) - $cap..] ELSE rel END AS released
+WITH n, kept, fixed, unsupported, released, unsupported AND n.retired_at IS NULL AS newly
+SET n.memory_ids = kept,
+    n.released_memory_ids = released,
+    n.retired_at = CASE WHEN newly THEN $now ELSE n.retired_at END,
+    n.retired_reason = CASE WHEN newly THEN $reason ELSE n.retired_reason END,
+    n.retired_by_memory_id = CASE WHEN newly THEN $by ELSE n.retired_by_memory_id END
+RETURN n.id AS id, kept AS memory_ids, released AS released_memory_ids,
+       unsupported, newly, fixed AS is_fixed_entity
+""" % _FIXED.format(v="n")
+
+# A node nothing holds any more: no relationship, no supporting memory, and not
+# the writer or the customer. Only nodes the caller names are considered.
+_DELETE_ORPHANS = """
+MATCH (n:SynapNode {_namespace: $ns})
+WHERE n.id IN $candidates AND size(coalesce(n.memory_ids, [])) = 0
+  AND NOT %s AND NOT EXISTS { (n)--() }
+WITH n, n.id AS id, n.canonical_name AS name, n.entity_type AS entity_type,
+     n.er_vector_name AS vector_name, coalesce(n.memory_ids, []) AS memory_ids
+DETACH DELETE n
+RETURN id, name, entity_type, vector_name, memory_ids
+""" % _FIXED.format(v="n")
+
+_SET_EDGE_STATES = """
+UNWIND $rows AS row
+MATCH (:SynapNode {_namespace: $ns})-[x {_namespace: $ns, id: row.id}]->(:SynapNode)
+SET x.retired_at = CASE WHEN row.open THEN null ELSE coalesce(x.retired_at, row.now) END,
+    x.retired_reason = CASE WHEN row.open THEN null ELSE row.reason END,
+    x.retired_by_memory_id = CASE WHEN row.open THEN null ELSE row.by END,
+    x.valid_to = CASE WHEN row.open THEN null ELSE row.valid_to END
+RETURN count(x) AS n
+"""
+
+_SET_NODE_STATES = """
+UNWIND $rows AS row
+MATCH (x:SynapNode {_namespace: $ns, id: row.id})
+WHERE row.open OR NOT %s
+SET x.retired_at = CASE WHEN row.open THEN null ELSE coalesce(x.retired_at, row.now) END,
+    x.retired_reason = CASE WHEN row.open THEN null ELSE row.reason END,
+    x.retired_by_memory_id = CASE WHEN row.open THEN null ELSE row.by END,
+    x.valid_to = CASE WHEN row.open THEN null ELSE row.valid_to END
+RETURN count(x) AS n
+""" % _FIXED.format(v="x")
+
+# erase_records: the named edges and every edge of a named node, then the named
+# nodes (never the writer's or the customer's).
+_ERASE_EDGES = """
+MATCH (a:SynapNode {_namespace: $ns})-[r]->(b:SynapNode)
+WHERE r._namespace = $ns
+  AND (r.id IN $edge_ids OR (a.id IN $node_ids AND NOT %s) OR (b.id IN $node_ids AND NOT %s))
+WITH a, b, r, r.id AS rid, type(r) AS rtype, coalesce(r.memory_ids, []) AS memory_ids
+DELETE r
+RETURN rid AS id, rtype AS type, memory_ids,
+       a.id AS from_id, a.canonical_name AS from_name, a.entity_type AS from_type,
+       a.er_vector_name AS from_vector_name,
+       b.id AS to_id, b.canonical_name AS to_name, b.entity_type AS to_type,
+       b.er_vector_name AS to_vector_name
+""" % (_FIXED.format(v="a"), _FIXED.format(v="b"))
+
+_ERASE_NODES = """
+MATCH (n:SynapNode {_namespace: $ns})
+WHERE n.id IN $node_ids AND NOT %s
+WITH n, n.id AS id, n.canonical_name AS name, n.entity_type AS entity_type,
+     n.er_vector_name AS vector_name, coalesce(n.memory_ids, []) AS memory_ids
+DETACH DELETE n
+RETURN id, name, entity_type, vector_name, memory_ids
+""" % _FIXED.format(v="n")
+
+# Reopen on append: a memory attached to a retired record supports it again.
+# Only when the append really added an id (a replay of an id already there
+# changes nothing). The caller attaches only memories alive in Postgres.
+_REOPEN = (" , {v}.retired_at = CASE WHEN size(merged) > size(current) THEN null ELSE {v}.retired_at END"
+           " , {v}.retired_reason = CASE WHEN size(merged) > size(current) THEN null ELSE {v}.retired_reason END"
+           " , {v}.retired_by_memory_id = CASE WHEN size(merged) > size(current) THEN null ELSE {v}.retired_by_memory_id END"
+           " , {v}.valid_to = CASE WHEN size(merged) > size(current) THEN null ELSE {v}.valid_to END")
+
+_LIST_NAMESPACES = """
+MATCH (n:SynapNode) WHERE n._namespace IS NOT NULL
+RETURN DISTINCT n._namespace AS ns
+"""
+
+_LIFECYCLE_EDGES = """
+MATCH (a:SynapNode {_namespace: $ns})-[r]->(:SynapNode)
+WHERE r._namespace = $ns
+RETURN r.id AS id, coalesce(r.memory_ids, []) AS memory_ids,
+       coalesce(r.released_memory_ids, []) AS released_memory_ids,
+       r.memory_contents AS memory_contents, r.retired_at AS retired_at
+"""
+
+_LIFECYCLE_NODES = """
+MATCH (n:SynapNode {_namespace: $ns})
+RETURN n.id AS id, coalesce(n.memory_ids, []) AS memory_ids,
+       coalesce(n.released_memory_ids, []) AS released_memory_ids,
+       %s AS is_fixed_entity, n.retired_at AS retired_at
+""" % _FIXED.format(v="n")
+
+# Copies mode: the relationships whose memory_contents JSON names one of $ids.
+_EDGES_WITH_CONTENTS = """
+MATCH (a:SynapNode {_namespace: $ns})-[r]->()
+WHERE r._namespace = $ns AND r.memory_contents IS NOT NULL
+  AND any(x IN $ids WHERE r.memory_contents CONTAINS x)
+RETURN r.id AS id, r.memory_contents AS memory_contents
+"""
+
+RELEASE_KEYS = ("edges_pruned", "edges_retired", "edges_deleted",
+                "nodes_pruned", "nodes_retired", "nodes_deleted")
+
+
+def _empty_release() -> Dict[str, Any]:
+    out: Dict[str, Any] = {k: 0 for k in RELEASE_KEYS}
+    out.update(records=[], deleted_edges=[], deleted_nodes=[])
+    return out
+
+
+def _edge_names(e: Dict) -> Dict[str, Any]:
+    return {k: e.get(k) for k in ("id", "type", "from_id", "from_name", "from_type", "from_vector_name",
+                                  "to_id", "to_name", "to_type", "to_vector_name")}
+
+
+def _node_names(n: Dict) -> Dict[str, Any]:
+    return {k: n.get(k) for k in ("id", "name", "entity_type", "vector_name")}
+
+
+def _release_summary(edges: List[Dict], nodes: List[Dict], orphans: List[Dict]) -> Dict[str, Any]:
+    """Counts and touched records from the rows of the three release statements."""
+    out = _empty_release()
+    out["edges_pruned"] = len(edges)
+    out["edges_retired"] = sum(1 for e in edges if e["newly"] and not e["deleted"])
+    out["edges_deleted"] = sum(1 for e in edges if e["deleted"])
+    out["nodes_pruned"] = len(nodes)
+    deleted_ids = {o["id"] for o in orphans}
+    out["nodes_retired"] = sum(1 for n in nodes if n["newly"] and n["id"] not in deleted_ids)
+    out["nodes_deleted"] = len(orphans)
+    out["records"] = (
+        [{"kind": "edge", "id": e["id"], "memory_ids": e["memory_ids"] or [],
+          "released_memory_ids": e["released_memory_ids"] or [], "deleted": bool(e["deleted"]),
+          "is_fixed_entity": False} for e in edges]
+        + [{"kind": "node", "id": n["id"], "memory_ids": n["memory_ids"] or [],
+            "released_memory_ids": n["released_memory_ids"] or [], "deleted": n["id"] in deleted_ids,
+            "is_fixed_entity": bool(n["is_fixed_entity"])} for n in nodes])
+    out["deleted_edges"] = [_edge_names(e) for e in edges if e["deleted"]]
+    out["deleted_nodes"] = [_node_names(o) for o in orphans]
+    return out
+
+
 class Neo4jAdapter(GraphStoreInterface):
     """
     Neo4j implementation of graph store interface.
@@ -484,15 +675,18 @@ class Neo4jAdapter(GraphStoreInterface):
     def append_to_node_list(self, namespace: str, node_id: str, key: str,
                             values: List[str], cap: int) -> None:
         """Add *values* to a list property of one node, in one statement:
-        no duplicates, and only the newest *cap* kept."""
+        no duplicates, and only the newest *cap* kept. Appending a NEW id to
+        `memory_ids` reopens a retired record (the caller attaches only
+        memories that are alive)."""
         if not _SAFE_IDENTIFIER.match(key):
             raise ValueError(f"Invalid property key: {key!r}")
+        reopen = _REOPEN.format(v="n") if key == "memory_ids" else ""
         self._run_write(f"""
             MATCH (n:SynapNode {{_namespace: $ns, id: $id}})
             WITH n, coalesce(n.{key}, []) AS current
-            WITH n, current + [v IN $values WHERE NOT v IN current] AS merged
+            WITH n, current, current + [v IN $values WHERE NOT v IN current] AS merged
             SET n.{key} = CASE WHEN size(merged) > $cap
-                               THEN merged[size(merged) - $cap..] ELSE merged END
+                               THEN merged[size(merged) - $cap..] ELSE merged END{reopen}
         """, {"ns": namespace, "id": node_id, "values": list(values), "cap": cap})
 
     def delete_node(self, namespace: str, node_id: str) -> None:
@@ -659,15 +853,18 @@ class Neo4jAdapter(GraphStoreInterface):
     def append_to_edge_list(self, namespace: str, edge_id: str, key: str,
                             values: List[str], cap: int) -> None:
         """Add *values* to a list property of one edge, in one statement:
-        no duplicates, and only the newest *cap* kept."""
+        no duplicates, and only the newest *cap* kept. Appending a NEW id to
+        `memory_ids` reopens a retired record (the caller attaches only
+        memories that are alive)."""
         if not _SAFE_IDENTIFIER.match(key):
             raise ValueError(f"Invalid property key: {key!r}")
+        reopen = _REOPEN.format(v="r") if key == "memory_ids" else ""
         self._run_write(f"""
             MATCH (:SynapNode {{_namespace: $ns}})-[r {{_namespace: $ns, id: $id}}]->()
             WITH r, coalesce(r.{key}, []) AS current
-            WITH r, current + [v IN $values WHERE NOT v IN current] AS merged
+            WITH r, current, current + [v IN $values WHERE NOT v IN current] AS merged
             SET r.{key} = CASE WHEN size(merged) > $cap
-                               THEN merged[size(merged) - $cap..] ELSE merged END
+                               THEN merged[size(merged) - $cap..] ELSE merged END{reopen}
         """, {"ns": namespace, "id": edge_id, "values": list(values), "cap": cap})
 
     def stamp_unstamped(self, namespace: str, kind: str, rows: List[Dict[str, Any]]) -> int:
@@ -739,6 +936,166 @@ class Neo4jAdapter(GraphStoreInterface):
                 return max(0, len(memories) - len(updated))
         raise RuntimeError(
             f"memory_contents of relationship {edge_id} kept changing; gave up after {attempts} attempts")
+
+    # --- Lifecycle: graph records follow the memories that support them ---
+    #
+    # A record (edge or node) is supported by the memories in `memory_ids`. When
+    # a memory is retired or deleted its id is released from every record in the
+    # namespace in ONE write transaction, so an `append_to_edge_list` running at
+    # the same time cannot interleave (Neo4j holds the record's write lock until
+    # commit). See issue12_graph.md section 5.
+
+    def _run_in_write_tx(self, work) -> Any:
+        """Run `work(tx)` in one managed write transaction and return its result.
+
+        For a change made of several statements that must commit together. A
+        managed transaction re-runs `work` only when it failed to commit, so the
+        statements must be idempotent (every lifecycle statement is)."""
+        start = time.time()
+        driver = self._get_driver()
+
+        @unit_of_work(timeout=self._query_timeout)
+        def _work(tx):
+            return work(tx)
+
+        try:
+            with driver.session(database=self._database) as session:
+                out = session.execute_write(_work)
+            logger.info(f"neo4j_write_tx_complete duration_ms={(time.time() - start) * 1000:.2f}")
+            return out
+        except Exception as e:
+            logger.error(f"neo4j_write_tx_failed error={e} duration_ms={(time.time() - start) * 1000:.2f}", exc_info=True)
+            raise
+
+    def release_memory_ids(self, namespace: str, ids: List[str], mode: str = "retire",
+                           now: Optional[str] = None, reason: str = "superseded",
+                           superseded_by: Optional[str] = None, cap: int = 500) -> Dict[str, Any]:
+        """See GraphStoreInterface.release_memory_ids."""
+        if mode not in ("retire", "erase"):
+            raise ValueError(f"mode must be retire or erase, not {mode!r}")
+        ids = [str(i) for i in dict.fromkeys(ids or []) if i]
+        out = _empty_release()
+        if not ids:
+            return out
+        from datetime import datetime, timezone
+        params = {"ns": namespace, "ids": ids, "cap": int(cap),
+                  "now": now or datetime.now(timezone.utc).isoformat(),
+                  "reason": reason, "by": str(superseded_by) if superseded_by else None,
+                  "erase": mode == "erase"}
+
+        def work(tx):
+            edges = [r.data() for r in tx.run(_RELEASE_EDGES, params)]
+            nodes = [r.data() for r in tx.run(_RELEASE_NODES, params)]
+            orphans: List[Dict] = []
+            if mode == "erase":
+                candidates = {n["id"] for n in nodes if not n["memory_ids"]}
+                for e in edges:
+                    if e["deleted"]:
+                        candidates.update((e["from_id"], e["to_id"]))
+                if candidates:
+                    orphans = [r.data() for r in tx.run(
+                        _DELETE_ORPHANS, {"ns": namespace, "candidates": sorted(candidates)})]
+            return edges, nodes, orphans
+
+        edges, nodes, orphans = self._run_in_write_tx(work)
+        return _release_summary(edges, nodes, orphans)
+
+    def set_record_states(self, namespace: str, states: List[Dict[str, Any]]) -> int:
+        """See GraphStoreInterface.set_record_states."""
+        rows = {"edge": [], "node": []}
+        for s in states or []:
+            kind = s.get("kind")
+            if kind not in rows:
+                raise ValueError(f"kind must be node or edge, not {kind!r}")
+            valid_to = s.get("valid_to")
+            rows[kind].append({
+                "id": str(s["id"]), "open": bool(s.get("open")),
+                "now": s.get("now"), "reason": s.get("reason"),
+                "by": str(s["retired_by_memory_id"]) if s.get("retired_by_memory_id") else None,
+                "valid_to": valid_to.isoformat() if hasattr(valid_to, "isoformat") else valid_to,
+            })
+        if not rows["edge"] and not rows["node"]:
+            return 0
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        for kind in rows:
+            for r in rows[kind]:
+                r["now"] = r["now"] or now
+
+        def work(tx):
+            n = 0
+            if rows["edge"]:
+                rec = tx.run(_SET_EDGE_STATES, {"ns": namespace, "rows": rows["edge"]}).single()
+                n += int(rec["n"]) if rec else 0
+            if rows["node"]:
+                rec = tx.run(_SET_NODE_STATES, {"ns": namespace, "rows": rows["node"]}).single()
+                n += int(rec["n"]) if rec else 0
+            return n
+
+        return int(self._run_in_write_tx(work))
+
+    def erase_records(self, namespace: str, edge_ids: List[str], node_ids: List[str]) -> Dict[str, Any]:
+        """See GraphStoreInterface.erase_records."""
+        params = {"ns": namespace, "edge_ids": [str(i) for i in edge_ids or []],
+                  "node_ids": [str(i) for i in node_ids or []]}
+        if not params["edge_ids"] and not params["node_ids"]:
+            return {"deleted_edges": [], "deleted_nodes": [], "records": []}
+
+        def work(tx):
+            edges = [r.data() for r in tx.run(_ERASE_EDGES, params)]
+            nodes = [r.data() for r in tx.run(_ERASE_NODES, params)]
+            candidates = set()
+            for e in edges:
+                candidates.update((e["from_id"], e["to_id"]))
+            candidates -= set(params["node_ids"])
+            orphans = []
+            if candidates:
+                orphans = [r.data() for r in tx.run(
+                    _DELETE_ORPHANS, {"ns": namespace, "candidates": sorted(candidates)})]
+            return edges, nodes, orphans
+
+        edges, nodes, orphans = self._run_in_write_tx(work)
+        return {
+            "deleted_edges": [_edge_names(e) for e in edges],
+            "deleted_nodes": [_node_names(n) for n in nodes + orphans],
+            "records": ([{"kind": "edge", "id": e["id"], "memory_ids": e.get("memory_ids") or []} for e in edges]
+                        + [{"kind": "node", "id": n["id"], "memory_ids": n.get("memory_ids") or []} for n in nodes]),
+        }
+
+    def list_namespaces(self) -> List[str]:
+        """Every graph namespace that holds a node (for the reconciler)."""
+        return [r["ns"] for r in self._run_query(_LIST_NAMESPACES, {})]
+
+    def lifecycle_records(self, namespace: str) -> List[Dict[str, Any]]:
+        """Every edge and node of *namespace* with what the lifecycle reads:
+        kind, id, memory_ids, released_memory_ids, legacy_ids (the memory ids
+        in a copies-mode ``memory_contents``), is_fixed_entity, retired_at."""
+        import json as _json
+        out: List[Dict[str, Any]] = []
+        for e in self._run_query(_LIFECYCLE_EDGES, {"ns": namespace}):
+            legacy: List[str] = []
+            if e.get("memory_contents"):
+                try:
+                    legacy = [str(m.get("memory_id")) for m in _json.loads(e["memory_contents"])
+                              if isinstance(m, dict) and m.get("memory_id")]
+                except (TypeError, ValueError):
+                    legacy = []
+            out.append({"kind": "edge", "id": e["id"], "memory_ids": list(e["memory_ids"]),
+                        "released_memory_ids": list(e["released_memory_ids"]), "legacy_ids": legacy,
+                        "is_fixed_entity": False, "retired_at": e.get("retired_at")})
+        for n in self._run_query(_LIFECYCLE_NODES, {"ns": namespace}):
+            out.append({"kind": "node", "id": n["id"], "memory_ids": list(n["memory_ids"]),
+                        "released_memory_ids": list(n["released_memory_ids"]), "legacy_ids": [],
+                        "is_fixed_entity": bool(n["is_fixed_entity"]), "retired_at": n.get("retired_at")})
+        return out
+
+    def edges_with_memory_contents(self, namespace: str, ids: List[str]) -> List[Dict[str, Any]]:
+        """Copies mode: ``[{id, memory_contents}]`` of the relationships whose
+        ``memory_contents`` names one of *ids*."""
+        ids = [str(i) for i in ids or [] if i]
+        if not ids:
+            return []
+        return self._run_query(_EDGES_WITH_CONTENTS, {"ns": namespace, "ids": ids})
 
     def strip_person_memories(self, client_id: str, field: str, value: str,
                               instance_ids: List[str], namespaces: Optional[List[str]] = None,
