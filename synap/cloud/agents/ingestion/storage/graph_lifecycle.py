@@ -181,12 +181,21 @@ class GraphLifecycle:
         result = ReleaseResult()
         return await self._apply(ns, records, reason, result, datetime.now(timezone.utc).isoformat())
 
-    async def erase_record(self, scope: Any, record_id: str) -> Optional[ErasedRecord]:
-        """Delete one relationship or entity by its graph id, in the first
-        namespace *scope* reads that holds it. Returns None when not found.
-        Authorisation is the caller's: this only looks where *scope* reads."""
-        from synap.cloud.shared import scope_key
-        for ns in scope_key.readable_scope_ids(scope):
+    async def erase_record(self, scope: Any, record_id: str, *,
+                           namespaces: Optional[List[str]] = None) -> Optional[ErasedRecord]:
+        """Delete one relationship or entity by its graph id.
+
+        Looks ONLY in *namespaces*, in that order, and erases in the first one
+        that holds the id; a record in any other namespace is neither found nor
+        touched. The caller decides where it may write (the SDK route passes
+        ``[scope_key.write_scope_id(scope)]``): reading a namespace is not
+        permission to delete in it, so there is no default and no widening.
+        Raises ValueError without *namespaces*. Returns None when not found."""
+        if namespaces is None:
+            raise ValueError(
+                "erase_record needs explicit namespaces= (the namespaces the caller may write); "
+                "it never falls back to the namespaces the caller can read")
+        for ns in [str(n) for n in dict.fromkeys(namespaces) if n]:
             out = await self._call("erase_records", ns, [record_id], [record_id])
             recs = out.get("records") or []
             if not recs:

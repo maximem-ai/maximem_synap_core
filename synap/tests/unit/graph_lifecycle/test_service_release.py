@@ -269,13 +269,41 @@ async def test_graph_failure_raises_so_the_outbox_keeps_the_row():
 
 async def test_erase_record_by_graph_id():
     g = _acme_graph(["m1"])
-    erased = await GraphLifecycle(g, load_supporters=_rows()).erase_record(_scope(), "e1")
-    assert erased.kind == "relationship" and erased.memory_ids == ["m1"]
+    lc = GraphLifecycle(g, load_supporters=_rows())
+    erased = await lc.erase_record(_scope(), "e1", namespaces=[NS])
+    assert erased.kind == "relationship" and erased.memory_ids == ["m1"] and erased.namespace == NS
     assert erased.edges_deleted == 1 and erased.nodes_deleted == 0, "Acme still carries m1"
-    assert await GraphLifecycle(g).erase_record(_scope(), "nope") is None
+    assert await lc.erase_record(_scope(), "nope", namespaces=[NS]) is None
     # The writer's node cannot be erased by id.
-    assert await GraphLifecycle(g).erase_record(_scope(), "u") is None
+    assert await lc.erase_record(_scope(), "u", namespaces=[NS]) is None
     assert g.n(NS, "u") is not None
+
+
+async def test_erase_record_needs_explicit_namespaces():
+    g = _acme_graph(["m1"])
+    with pytest.raises(ValueError):
+        await GraphLifecycle(g).erase_record(_scope(), "e1")
+    assert g.e(NS, "e1") is not None
+
+
+async def test_erase_record_only_in_the_given_namespaces():
+    """A record in a namespace the caller can read but was not given (the
+    customer's shared graph) is not found and not erased."""
+    shared = str(CUST)
+    g = _acme_graph(["m1"])
+    g.node(shared, "s1", "Shared Co", "organization")
+    g.node(shared, "s2", "Partner", "organization")
+    g.edge(shared, "e_shared", "s1", "s2", "PARTNERS_WITH", memory_ids=["m5"])
+    lc = GraphLifecycle(g, load_supporters=_rows())
+    assert shared in release_namespaces(_scope()), "the caller can read the shared graph"
+    assert await lc.erase_record(_scope(), "e_shared", namespaces=[NS]) is None
+    assert g.e(shared, "e_shared") is not None and g.n(shared, "s1") is not None
+    assert await lc.erase_record(_scope(), "e_shared", namespaces=[]) is None
+    assert g.e(shared, "e_shared") is not None
+    # Given explicitly, it is found there and only there.
+    erased = await lc.erase_record(_scope(), "e_shared", namespaces=[NS, shared])
+    assert erased.namespace == shared and g.e(shared, "e_shared") is None
+    assert g.e(NS, "e1") is not None
 
 
 def test_release_result_adds_up():
