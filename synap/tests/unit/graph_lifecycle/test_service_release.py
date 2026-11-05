@@ -156,16 +156,33 @@ async def test_release_is_idempotent():
     assert not again.changed
 
 
-async def test_reopen_on_append_of_a_live_memory():
+async def test_attach_reopens_a_retired_record_only_when_the_rule_says_open(monkeypatch):
+    monkeypatch.setenv("SYNAP_GRAPH_LIFECYCLE", "true")
+    import synap.cloud.agents.ingestion.storage.graph_lifecycle as glc
     g = _acme_graph(["m1"])
     await GraphLifecycle(g, load_supporters=_rows()).release(_scope(), ["m1"], mode="retire", reason="deleted")
     assert g.e(NS, "e1")["retired_at"]
+    wrapper = AsyncGraphWrapper(g)
+
+    # A dead memory attached (e.g. a DLQ replay): the record stays retired.
+    monkeypatch.setattr(glc, "_default_loader", lambda: _rows(
+        m9=SupporterRow(id="m9", deleted_at=D(2))))
     g.append_to_edge_list(NS, "e1", "memory_ids", ["m9"], 500)
-    assert "retired_at" not in g.e(NS, "e1")
-    # Re-appending an id already there (a replay) does not reopen.
-    g.set_record_states(NS, [{"kind": "edge", "id": "e1", "open": False, "reason": "superseded"}])
-    g.append_to_edge_list(NS, "e1", "memory_ids", ["m9"], 500)
+    await wrapper._reevaluate_retired(_scope(), NS, ["e1"])
     assert g.e(NS, "e1")["retired_at"]
+
+    # An alive memory attached: the rule says Open and the record reopens.
+    monkeypatch.setattr(glc, "_default_loader", lambda: _rows(
+        m9=SupporterRow(id="m9", deleted_at=D(2)), m10=SupporterRow(id="m10", document_created_at=D(27))))
+    g.append_to_edge_list(NS, "e1", "memory_ids", ["m10"], 500)
+    await wrapper._reevaluate_retired(_scope(), NS, ["e1", "acme"])
+    assert "retired_at" not in g.e(NS, "e1")
+
+
+async def test_reevaluate_leaves_open_records_alone():
+    g = _acme_graph(["m1"])
+    n = await GraphLifecycle(g, load_supporters=_rows()).reevaluate(NS, ["e1", "acme"])
+    assert n == 0 and "retired_at" not in g.e(NS, "e1")
 
 
 async def test_update_retires_old_support_with_reason_updated():
