@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from synap.cloud.agents.ingestion.interfaces import LLMClient
+from synap.cloud.infrastructure.llm.models import LLMTimeoutError
 from synap.cloud.agents.ingestion.models import ExtractedMemory, MemoryType, Scope
 from synap.cloud.agents.ingestion.storage.vector_wrapper import AsyncVectorWrapper
 from synap.cloud.shared import edition
@@ -2818,6 +2819,12 @@ class KnowledgeUpdateDetector:
         except json.JSONDecodeError as e:
             logger.warning("Knowledge-update LLM response not valid JSON: %s", e)
             return None
+        except LLMTimeoutError:
+            # The model did not answer in time. Returning None here would save
+            # the new memory with no supersession check; fail the stage instead
+            # so the worker retries it (and dead-letters it after the last try).
+            logger.warning("Knowledge-update classification timed out; failing the stage so it is retried")
+            raise
         except Exception as e:
             logger.warning("Knowledge-update classification failed: %s", e)
             return None
@@ -2884,6 +2891,11 @@ class KnowledgeUpdateDetector:
         except json.JSONDecodeError as e:
             logger.warning("knowledge_update batch classify not valid JSON: %s", e)
             return {}
+        except LLMTimeoutError:
+            # Same rule as _classify_pair. Not falling back to per-pair calls
+            # either: each would wait out the same read limit again.
+            logger.warning("knowledge_update batch classify timed out; failing the stage so it is retried")
+            raise
         except Exception as e:
             logger.warning("knowledge_update batch classify failed: %s", e)
             return {}

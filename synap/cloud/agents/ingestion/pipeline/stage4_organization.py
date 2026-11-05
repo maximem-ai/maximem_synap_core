@@ -39,6 +39,7 @@ from synap.cloud.memory_config.config_schema import MemoryArchitectureConfig
 from synap.cloud.agents.ingestion.services import anchor_resolver
 from synap.cloud.shared.logging_utils import log_data_sample, truncate_string
 from synap.cloud.shared import edition
+from synap.cloud.infrastructure.llm.models import LLMTimeoutError
 from synap.cloud.observability.tracing import start_span, set_current_span_attributes
 from synap.cloud.shared.hook_signals import inc_counter
 
@@ -888,6 +889,14 @@ class Stage4Organizer:
                         "Stage 4: Knowledge-update complete superseded=%d skipped=%d enriched=%d merged=%d deleted=%d subject_grouped=%d",
                         superseded_count, skipped_count, enriched_count, merged_count, deleted_count, subject_count,
                     )
+            except LLMTimeoutError:
+                # The classification model did not answer in time. Saving the
+                # new memories without the supersession check would leave stale
+                # facts serving next to their replacements, so the stage fails
+                # and the worker's retry / dead-letter queue takes over. Every
+                # other knowledge-update failure stays non-fatal, as before.
+                logger.warning("Stage 4: Knowledge-update classification timed out; failing the stage for retry")
+                raise
             except Exception as e:
                 logger.warning(
                     "Stage 4: Knowledge-update detection failed (non-fatal): %s", e,
