@@ -5,7 +5,7 @@
 # (synap/boot/first_start.py). The same image applies the schema (synap/db/runner.py).
 #
 #   docker build -t synap-core:local .
-FROM python:3.11-slim
+FROM python:3.15-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
