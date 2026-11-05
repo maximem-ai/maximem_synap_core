@@ -120,8 +120,40 @@ async def start_ingestion_workers() -> None:
         )
         _start_failures.append("the stage workers")
 
+    # The graph side of retired and deleted memories (graph_sync_pending).
+    try:
+        _start_graph_sync_worker()
+    except Exception as e:
+        logger.warning(f"Graph sync drain worker failed to start: {e}", exc_info=True)
+        _start_failures.append("the graph sync worker")
+
     _running = True
     logger.info(f"Ingestion workers started: {len(_worker_tasks)} tasks")
+
+
+def _start_graph_sync_worker() -> bool:
+    """Start the outbox drain worker (storage/graph_sync_outbox.py) when the
+    graph lifecycle is on and a graph store is configured. Returns whether it
+    started. A database without the table is handled by the worker itself
+    (one warning, then idle)."""
+    from synap.cloud.agents.ingestion.storage.graph_lifecycle import lifecycle_enabled
+    from synap.cloud.agents.ingestion.storage.graph_sync_outbox import run_drain_worker
+    if not lifecycle_enabled() or not os.getenv("NEO4J_URI"):
+        logger.info("Graph sync drain worker not started (SYNAP_GRAPH_LIFECYCLE off or no graph)")
+        return False
+    coordinator = _get_storage_coordinator()
+    graph = getattr(coordinator, "_graph", None)
+    if graph is None:
+        logger.warning("Graph sync drain worker not started: the graph store is unavailable")
+        return False
+    try:
+        interval = float(os.getenv("SYNAP_GRAPH_SYNC_INTERVAL_SECONDS", "10"))
+    except ValueError:
+        interval = 10.0
+    _worker_tasks.append(asyncio.create_task(run_drain_worker(
+        graph=graph, vector=getattr(coordinator, "_vector", None), interval=interval)))
+    logger.info("Graph sync drain worker started (interval %.0fs)", interval)
+    return True
 
 
 async def _start_stage_workers(
