@@ -20,7 +20,7 @@ from synap.cloud.infrastructure.llm.models import (
     ProviderTimeoutError,
     RateLimitError
 )
-from .base import BaseLLMProvider
+from .base import BaseLLMProvider, SLOW_ANSWER_TIMEOUTS as _SLOW_ANSWER
 
 # Reasoning-family models (gpt-5, gpt-6, o-series) reject ``max_tokens`` and any
 # ``temperature`` but the default. Verified 2026-10-21 against gpt-6-luna: 400
@@ -208,7 +208,7 @@ class OpenAIProvider(BaseLLMProvider):
 
             data = response.json()
 
-        except httpx.TimeoutException as e:
+        except _SLOW_ANSWER as e:
             # A slow or stuck request says nothing about the key or the model:
             # do not mark the key unhealthy, and raise the timeout type the
             # manager keeps out of the availability tracker.
@@ -315,7 +315,7 @@ class OpenAIProvider(BaseLLMProvider):
                         content = delta.get("content", "")
                         if content:
                             yield content
-        except httpx.TimeoutException as e:
+        except _SLOW_ANSWER as e:
             # Not counted toward model availability: see ProviderTimeoutError.
             raise ProviderTimeoutError("openai", type(e).__name__) from e
 

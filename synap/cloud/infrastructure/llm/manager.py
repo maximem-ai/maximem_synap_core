@@ -19,6 +19,7 @@ from .models import (
     LLMError,
     ProviderError,
     ProviderTimeoutError,
+    LLMTimeoutError,
     RateLimitError,
 )
 from . import call_trace
@@ -467,6 +468,7 @@ class LLMConfigManager:
         attempted_models: List[str] = []
         failures: List[str] = []
         current_model = model_info
+        timed_out = False
         pinned_provider = (
             force_provider if not allow_cross_provider_fallback else None
         )
@@ -580,6 +582,7 @@ class LLMConfigManager:
                 # window would take the only configured model offline.
                 logger.warning(f"Provider timeout for {current_model.name}: {e}")
                 last_error = e
+                timed_out = True
                 failures.append(f"{current_model.name}: {e}")
 
                 attempted_models.append(current_model.name)
@@ -625,9 +628,12 @@ class LLMConfigManager:
         # when the primary rejected a request for length and the fallback was
         # a provider with no key, "Last error: Provider gemini not available"
         # hid the real reason for an afternoon.
+        # A timeout anywhere in the chain gets its own type, so a caller can tell
+        # "no answer in time" (worth retrying) from a bad or refused request.
+        error_cls = LLMTimeoutError if timed_out else LLMError
         if failures:
-            raise LLMError("All models failed. " + " | ".join(failures))
-        raise LLMError(f"All models failed. Last error: {last_error}")
+            raise error_cls("All models failed. " + " | ".join(failures)) from last_error
+        raise error_cls(f"All models failed. Last error: {last_error}") from last_error
 
     def _allowed_fallback(
         self,
@@ -819,7 +825,7 @@ class LLMConfigManager:
         except ProviderTimeoutError as e:
             # Same rule as complete(): a timeout is not counted toward availability.
             trace_error = e
-            raise LLMError(f"Streaming failed: {e}")
+            raise LLMTimeoutError(f"Streaming failed: {e}") from e
         except Exception as e:
             trace_error = e
             await self._tracker.record_error(

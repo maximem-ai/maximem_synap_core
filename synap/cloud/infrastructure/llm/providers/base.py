@@ -18,13 +18,13 @@ from synap.cloud.infrastructure.llm.models import (
 
 
 
-def _seconds_from_env(name: str, default: Optional[float]) -> Optional[float]:
+def _seconds_from_env(name: str, default: Optional[float], environ=None) -> Optional[float]:
     """Seconds from an env var. 'none', 'off' or '0' means no limit (None).
 
     Anything else that is not a positive number stops start-up with a message
     naming the variable, so a typo is never silently replaced by a default.
     """
-    raw = os.environ.get(name)
+    raw = (os.environ if environ is None else environ).get(name)
     if raw is None or raw.strip() == "":
         return default
     value = raw.strip().lower()
@@ -37,6 +37,33 @@ def _seconds_from_env(name: str, default: Optional[float]) -> Optional[float]:
     if seconds < 0:
         raise ValueError(f"{name} must not be negative, got {raw!r}")
     return seconds
+
+
+# The timeouts that mean "the provider accepted the request but did not answer
+# in time". They raise ProviderTimeoutError, which neither marks the API key
+# unhealthy nor counts toward model availability. A ConnectTimeout is left out
+# on purpose: failing to even connect within 10 s means the endpoint is
+# unreachable, which is the evidence the availability tracker exists for, so it
+# keeps its old path (httpx.RequestError: key failure, counted error).
+SLOW_ANSWER_TIMEOUTS = (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)
+
+
+LLM_TIMEOUT_VARS = (
+    ("SYNAP_LLM_READ_TIMEOUT_SECONDS", 300.0),
+    ("SYNAP_LLM_WRITE_TIMEOUT_SECONDS", 60.0),
+)
+
+
+def timeout_setting_problems(environ=None) -> List[str]:
+    """One message per invalid timeout variable; checked by Core start-up so a
+    typo stops the server instead of being logged as a provider init failure."""
+    found = []
+    for name, default in LLM_TIMEOUT_VARS:
+        try:
+            _seconds_from_env(name, default, environ)
+        except ValueError as exc:
+            found.append(str(exc))
+    return found
 
 
 def llm_http_timeout() -> httpx.Timeout:
@@ -217,11 +244,18 @@ class BaseLLMProvider(ILLMProvider):
             self.api_key = api_key
 
         # Shared HTTP client with connection pooling (avoids TCP+TLS per request).
-        # Read timeout is bounded (default 300 s, SYNAP_LLM_READ_TIMEOUT_SECONDS):
-        # LLM calls can take minutes for large prompts, but a request that never
-        # answers must not hold an ingestion worker forever. A timeout raises
-        # ProviderTimeoutError, which the manager does NOT count toward model
-        # availability, so slow calls cannot take the model offline.
+        # Timeouts come from llm_http_timeout(): connect 10 s, read 300 s
+        # (SYNAP_LLM_READ_TIMEOUT_SECONDS), write 60 s
+        # (SYNAP_LLM_WRITE_TIMEOUT_SECONDS), pool unlimited. The read limit was
+        # once removed because a timeout raised a plain ProviderError, which the
+        # manager counts toward model availability: three slow calls in the
+        # penalty window took the only model offline for everyone. Now a read or
+        # write timeout raises ProviderTimeoutError, which the providers do not
+        # hold against the API key and the manager does not count; the call still
+        # fails (LLMTimeoutError), so the ingestion stage retries and, after its
+        # last try, dead-letters the document instead of hanging a worker forever.
+        # Calls that pass their own timeout= (e.g. Ollama's 5 s health check)
+        # keep it.
         self._http_client = httpx.AsyncClient(
             timeout=llm_http_timeout(),
             limits=httpx.Limits(

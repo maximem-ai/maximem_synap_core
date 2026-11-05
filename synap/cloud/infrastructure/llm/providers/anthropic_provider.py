@@ -20,7 +20,7 @@ from synap.cloud.infrastructure.llm.models import (
     ProviderTimeoutError,
     RateLimitError
 )
-from .base import BaseLLMProvider
+from .base import BaseLLMProvider, SLOW_ANSWER_TIMEOUTS as _SLOW_ANSWER
 
 
 class AnthropicProvider(BaseLLMProvider):
@@ -220,7 +220,7 @@ class AnthropicProvider(BaseLLMProvider):
 
             data = response.json()
 
-        except httpx.TimeoutException as e:
+        except _SLOW_ANSWER as e:
             # A slow or stuck request says nothing about the key or the model:
             # do not mark the key unhealthy, and raise the timeout type the
             # manager keeps out of the availability tracker.
@@ -332,7 +332,7 @@ class AnthropicProvider(BaseLLMProvider):
                             delta = data.get("delta", {})
                             if delta.get("type") == "text_delta":
                                 yield delta.get("text", "")
-        except httpx.TimeoutException as e:
+        except _SLOW_ANSWER as e:
             # Not counted toward model availability: see ProviderTimeoutError.
             raise ProviderTimeoutError("anthropic", type(e).__name__) from e
 

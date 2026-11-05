@@ -317,6 +317,17 @@ class LLMError(Exception):
     pass
 
 
+class LLMTimeoutError(LLMError):
+    """A model call failed because the provider did not answer in time.
+
+    Raised by the manager (complete and stream) when an attempt ended in
+    ProviderTimeoutError, so callers that must not carry on without an answer
+    (knowledge-update classification) can tell a timeout from a bad answer and
+    fail their stage, letting the worker's retry and dead-letter queue run.
+    """
+    pass
+
+
 class ProviderError(LLMError):
     """Error from LLM provider."""
     def __init__(self, message: str, provider: str, status_code: Optional[int] = None):
