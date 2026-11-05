@@ -102,3 +102,65 @@ class GraphStoreInterface(ABC):
     def query(self, query: GraphQuery) -> GraphResult:
         """Execute graph query."""
         pass
+
+    # Lifecycle (graph records follow the memories that support them).
+    # Not abstract: an adapter that predates them still loads, and a caller
+    # learns it cannot release by the NotImplementedError, never by silence.
+
+    def release_memory_ids(
+        self,
+        namespace: str,
+        ids: List[str],
+        mode: str = "retire",
+        now: Optional[str] = None,
+        reason: str = "superseded",
+        superseded_by: Optional[str] = None,
+        cap: int = 500,
+    ) -> Dict[str, Any]:
+        """Remove *ids* from ``memory_ids`` on every edge and node of *namespace*,
+        in one write transaction.
+
+        Each removed id is appended to ``released_memory_ids`` (newest *cap*
+        kept). A record left with no ``memory_ids`` is retired
+        (``retired_at``/``retired_reason``/``retired_by_memory_id``, first
+        retirement wins). With ``mode="erase"`` such an edge is deleted instead,
+        and every node left with no edges and no ``memory_ids`` (a touched node
+        or an endpoint of a deleted edge) is DETACH DELETEd, except the writer's
+        and the customer's node. Returns counts (``edges_pruned``,
+        ``edges_retired``, ``edges_deleted``, ``nodes_pruned``,
+        ``nodes_retired``, ``nodes_deleted``) and the touched records
+        (``records``: kind, id, memory_ids, released_memory_ids, deleted,
+        is_fixed_entity) plus ``deleted_edges``/``deleted_nodes`` with the
+        names their vector ids are derived from.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot release memory ids")
+
+    def set_record_states(self, namespace: str, states: List[Dict[str, Any]]) -> int:
+        """Write the lifecycle state of edges and nodes in one write transaction.
+
+        Each state is ``{"kind": "edge"|"node", "id", "open": bool, "now",
+        "reason", "valid_to", "retired_by_memory_id"}``. Open removes the
+        retirement properties; closed sets them (``retired_at`` keeps the first
+        value). Returns how many records were written."""
+        raise NotImplementedError(f"{type(self).__name__} cannot set record states")
+
+    def erase_records(self, namespace: str, edge_ids: List[str], node_ids: List[str]) -> Dict[str, Any]:
+        """Delete the given edges and nodes (DETACH), then every endpoint left
+        with no edges and no ``memory_ids``; writer and customer nodes are never
+        deleted. One write transaction. Returns ``deleted_edges`` and
+        ``deleted_nodes`` like ``release_memory_ids``."""
+        raise NotImplementedError(f"{type(self).__name__} cannot erase records")
+
+    def list_namespaces(self) -> List[str]:
+        """Every graph namespace that holds a record."""
+        raise NotImplementedError(f"{type(self).__name__} cannot list namespaces")
+
+    def lifecycle_records(self, namespace: str) -> List[Dict[str, Any]]:
+        """Every edge and node of *namespace* with its lifecycle properties
+        (kind, id, memory_ids, released_memory_ids, legacy_ids, is_fixed_entity,
+        retired_at)."""
+        raise NotImplementedError(f"{type(self).__name__} cannot list lifecycle records")
+
+    def edges_with_memory_contents(self, namespace: str, ids: List[str]) -> List[Dict[str, Any]]:
+        """Copies mode: the relationships whose ``memory_contents`` names one of *ids*."""
+        raise NotImplementedError(f"{type(self).__name__} cannot search memory_contents")
