@@ -60,8 +60,13 @@ class FakeLifecycle:
         return SimpleNamespace(edges_pruned=0, edges_retired=0, edges_deleted=1,
                                nodes_pruned=0, nodes_retired=0, nodes_deleted=1)
 
-    async def erase_record(self, scope, record_id):
+    async def erase_record(self, scope, record_id, *, namespaces=None):
+        """`self.erased` lives in namespace `self.erased_ns` (None = anywhere)."""
         self.erase_calls.append(record_id)
+        self.namespaces_asked = list(namespaces or [])
+        ns = getattr(self, "erased_ns", None)
+        if ns is not None and ns not in self.namespaces_asked:
+            return None
         return self.erased
 
 
@@ -206,3 +211,53 @@ async def test_update_retires_old_support_with_reason_updated(wired, monkeypatch
     assert len(wired.cache) == 1
     assert wired.events == [("enqueue", "retire", "updated", [mid], 0)]
     assert wired.completed == ["row-1"]
+
+
+async def test_user_cannot_erase_a_customer_level_record(wired, monkeypatch):
+    """Security: a user-scope caller passing the id of an edge in the customer's
+    shared graph gets 404, and only the user's own graph is searched."""
+    from fastapi import HTTPException
+
+    monkeypatch.setenv("SYNAP_GRAPH_PER_SCOPE", "true")
+    client, customer, user = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    user_scope = SimpleNamespace(client_id=client, instance_id="inst_x", customer_id=customer,
+                                 user_id=user, scope_level="user", chain=None)
+
+    async def resolve(auth, user_id, customer_id, scope_path=None):
+        return user_scope
+
+    monkeypatch.setattr(sdk_memories, "_resolve_scope", resolve)
+    wired.lifecycle.erased = SimpleNamespace(kind="relationship", memory_ids=[],
+                                             edges_deleted=1, nodes_deleted=0)
+    wired.lifecycle.erased_ns = str(customer)  # the edge is customer-level
+
+    with pytest.raises(HTTPException) as err:
+        await sdk_memories.delete_memory(str(uuid.uuid4()), _auth(), FakeSession(None),
+                                         customer_id="acme", user_id="u1")
+    assert err.value.status_code == 404
+    assert str(customer) not in wired.lifecycle.namespaces_asked
+    assert str(client) not in wired.lifecycle.namespaces_asked
+    assert str(user) in wired.lifecycle.namespaces_asked
+
+    # The same caller CAN erase a record in its own graph.
+    wired.lifecycle.erased_ns = str(user)
+    answer = await sdk_memories.delete_memory(str(uuid.uuid4()), _auth(), FakeSession(None),
+                                              customer_id="acme", user_id="u1")
+    assert answer.kind == "relationship" and answer.fully_removed is True
+
+
+async def test_graph_id_delete_refused_when_service_cannot_limit_namespaces(wired):
+    class OldLifecycle:
+        async def erase_record(self, scope, record_id):
+            raise AssertionError("must not search readable namespaces")
+
+    import synap.cloud.application.sdk_api.sdk_memories as m
+    m_lc = OldLifecycle()
+    orig = m._graph_lifecycle
+    m._graph_lifecycle = lambda g: m_lc
+    try:
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException):
+            await sdk_memories.delete_memory(str(uuid.uuid4()), _auth(), FakeSession(None))
+    finally:
+        m._graph_lifecycle = orig
