@@ -2,6 +2,10 @@ name: Bug report
 description: Something in Synap Core does not work as documented.
 labels: ["bug"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Pull requests against `synap/` get closed, because the engine is developed in our source repository and copied here; send an engine change as an issue instead (a failing test or a diff attached helps).
   - type: input
     id: version
     attributes:
