@@ -18,6 +18,7 @@
   <a href="https://github.com/maximem-ai/maximem_synap_sdk"><strong>SDKs & integrations</strong></a> ·
   <a href="https://github.com/maximem-ai/memory_and_context_eval_harness"><strong>Evals (reproduce our numbers)</strong></a> ·
   <a href="https://github.com/maximem-ai/maximem_synap_core/discussions"><strong>Discussions</strong></a> ·
+  <a href="https://discord.gg/Q25GHtrdZq"><strong>Discord</strong></a> ·
   <a href="https://synap.maximem.ai"><strong>Synap Cloud</strong></a>
 </p>
 
@@ -404,6 +405,7 @@ The Synap Core section of [docs.maximem.ai](https://docs.maximem.ai/core/quickst
 - 🧰 [SDKs & framework integrations](https://github.com/maximem-ai/maximem_synap_sdk)
 - 🧪 [Evaluation harness](https://github.com/maximem-ai/memory_and_context_eval_harness) and [benchmark run data](https://github.com/maximem-ai/eval_benchmark_runs_output)
 - ☁️ [Synap Cloud dashboard](https://synap.maximem.ai)
+- 🎮 [Discord](https://discord.gg/Q25GHtrdZq): chat with the team and other builders
 - 💬 [GitHub Discussions](https://github.com/maximem-ai/maximem_synap_core/discussions): questions, ideas, show what you built
 - 🐛 [Issues](https://github.com/maximem-ai/maximem_synap_core/issues): bugs and gaps
 - 🔒 [Security policy](SECURITY.md)
