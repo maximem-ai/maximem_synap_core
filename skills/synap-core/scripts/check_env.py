@@ -13,11 +13,14 @@ Standard library only. A secret is never printed.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import sys
 
 PROVIDERS = ("openai", "anthropic", "ollama", "openai-compatible")
+# Read by the server at start-up (synap/cloud/infrastructure/llm/providers/base.py); an invalid value stops it.
+TIMEOUT_VARS = ("SYNAP_LLM_READ_TIMEOUT_SECONDS", "SYNAP_LLM_WRITE_TIMEOUT_SECONDS")
 lines: list[str] = []
 
 
@@ -46,6 +49,26 @@ def read(path: str) -> dict[str, str]:
         key, _, value = raw.partition("=")
         vals[key.strip()] = value.split("  #")[0].rstrip()
     return vals
+
+
+def timeout_problem(raw: str) -> str | None:
+    """Why the server would refuse this timeout value at start-up, or None when it accepts it.
+
+    Mirrors the server's parsing: empty means the default, 'none', 'off' or '0' mean no limit,
+    anything else must be a finite, non-negative number of seconds.
+    """
+    value = raw.strip().lower()
+    if value in ("", "none", "off", "0"):
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        return "is not a number of seconds or 'none'"
+    if not math.isfinite(seconds):
+        return "is not a finite number of seconds; write 'none' for no limit"
+    if seconds < 0:
+        return "is negative"
+    return None
 
 
 def main() -> None:
@@ -124,6 +147,15 @@ def main() -> None:
             say("ERROR", f"{key} has a character that is not plain ASCII (code {hex(ord(value[odd[0]]))} at position {odd[0] + 1} of {len(value)}). A stray keystroke while pasting is the usual cause; delete it and save. The server cannot send it in a request header.")
         elif key.endswith(("_KEY", "_TOKEN", "_PASSWORD")) and any(c.isspace() for c in value):
             say("ERROR", f"{key} has a space inside it. Keys and tokens have none; check the paste.")
+
+    for key in TIMEOUT_VARS:
+        if key not in v:
+            continue
+        problem = timeout_problem(v[key])
+        if problem:
+            say("ERROR", f"{key} = '{v[key]}' {problem}. The server stops at start-up until you fix it (for example {key}=300, or 'none' for no limit).")
+        else:
+            say("OK", f"{key} = {v[key].strip() or 'default'}")
 
     if has("SYNAP_API_TOKEN"):
         say("OK", f"SYNAP_API_TOKEN is set ({len(v['SYNAP_API_TOKEN'])} characters): every request must carry it")

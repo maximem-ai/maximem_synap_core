@@ -107,3 +107,11 @@ def test_a_missing_example_is_reported(run, tmp_path):
     done = run("set_env.py", "--file", str(tmp_path / ".env"), "SYNAP_LLM_MODEL=x")
     assert done.returncode == 2
     assert "no .env.example" in done.stdout
+
+
+def test_the_llm_timeouts_from_the_example_can_be_set(run, env_example):
+    done = run("set_env.py", "--file", str(env_example),
+               "SYNAP_LLM_READ_TIMEOUT_SECONDS=900", "SYNAP_LLM_WRITE_TIMEOUT_SECONDS=none")
+    assert done.returncode == 0, done.stdout
+    assert lines_for(env_example, "SYNAP_LLM_READ_TIMEOUT_SECONDS") == ["SYNAP_LLM_READ_TIMEOUT_SECONDS=900"]
+    assert lines_for(env_example, "SYNAP_LLM_WRITE_TIMEOUT_SECONDS") == ["SYNAP_LLM_WRITE_TIMEOUT_SECONDS=none"]

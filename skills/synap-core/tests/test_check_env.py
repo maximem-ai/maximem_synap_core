@@ -125,3 +125,24 @@ def test_a_leftover_cloud_key_warns(check):
     done = check({**GOOD, "SYNAP_CLOUD_API_KEY": "mk-" + "Zz1" * 6})
     assert "SYNAP_CLOUD_API_KEY is set" in done.stdout
     assert "Zz1" * 6 not in done.stdout
+
+
+@pytest.mark.parametrize("value", ["300", "12.5", "none", "off", "0", ""])
+def test_a_timeout_the_server_accepts_passes(check, value):
+    done = check({**GOOD, "SYNAP_LLM_READ_TIMEOUT_SECONDS": value})
+    assert done.returncode == 0, done.stdout
+    assert "[OK] SYNAP_LLM_READ_TIMEOUT_SECONDS" in done.stdout
+
+
+@pytest.mark.parametrize("key", ["SYNAP_LLM_READ_TIMEOUT_SECONDS", "SYNAP_LLM_WRITE_TIMEOUT_SECONDS"])
+@pytest.mark.parametrize("value", ["5m", "inf", "nan", "-1"])
+def test_a_timeout_that_stops_the_server_fails(check, key, value):
+    done = check({**GOOD, key: value})
+    assert done.returncode == 1, done.stdout
+    assert f"[ERROR] {key} = '{value}'" in done.stdout
+    assert "stops at start-up" in done.stdout
+
+
+def test_an_unset_timeout_is_not_mentioned(check):
+    done = check(GOOD)
+    assert "TIMEOUT_SECONDS" not in done.stdout
