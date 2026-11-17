@@ -121,7 +121,6 @@ NOT_PROMPTS = {
      "This install already holds memories"): "422 detail returned to the caller",
     ("cloud/application/sdk_api/maca_plugin.py",
      "The config sets user_context_isolation"): "invalid-job problem returned to the developer",
-    # sdk_api was added to SCANNED when the SDK routes moved out of admin_api
     # These are text returned to the API caller,
     # never sent to a model: error details, response notes, warnings, field docs.
     ("cloud/application/sdk_api/sdk_context.py",

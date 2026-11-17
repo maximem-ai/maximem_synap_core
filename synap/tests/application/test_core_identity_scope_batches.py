@@ -1,8 +1,7 @@
 """Scope refusal on the real batch request models.
 
 Separate from test_core_identity.py because these import sdk_conversations and
-sdk_memories, which do not import in a Core tree; the sync drops this file there
-and keeps the Core-safe one.
+sdk_memories, which do not import in Core; test_core_identity.py is the Core-safe one.
 """
 from __future__ import annotations
 

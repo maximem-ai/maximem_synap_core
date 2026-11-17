@@ -26,8 +26,8 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 CAPTURE = ROOT / "cloud/application/middleware/request_payload_capture.py"
 TRACKER = ROOT / "cloud/application/conversation/tracker.py"
-# The gate itself moved out of the tracker into Cloud's hook, so Core stores a
-# turn without importing the privacy folder. The tracker still takes and passes the scope.
+# The gate itself moved out of the tracker into a hook, so Core stores a
+# turn without importing it. The tracker still takes and passes the scope.
 TURN_HOOK = ROOT / "cloud/cloud_hooks/application.py"
 
 

@@ -1,7 +1,7 @@
 """Lightweight tokenizer for BM25 and overlap detection.
 
-Mirrors the tokenizer in synap/sdk/python/maximem_synap/cache/bm25.py
-to avoid cross-package imports. Keep in sync if the SDK version changes.
+Mirrors the BM25 tokenizer in the Python SDK to avoid cross-package imports.
+Keep the two the same if the SDK version changes.
 """
 
 import re

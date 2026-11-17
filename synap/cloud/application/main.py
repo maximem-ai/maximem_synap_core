@@ -544,8 +544,7 @@ async def lifespan(app: FastAPI):
 
     # Start context-audit-enrichment finalize-on-timeout watcher. Backfills
     # synthetic enrichment rows when the SDK fails to emit
-    # ContextAssembledEvent within the timeout window
-    # (see docs/internal/sdk_authoritative_short_term_context_plan.md).
+    # ContextAssembledEvent within the timeout window.
     try:
         global _enrichment_watcher, _enrichment_watcher_task
         from synap.cloud.application.audit.enrichment_watcher import EnrichmentWatcher

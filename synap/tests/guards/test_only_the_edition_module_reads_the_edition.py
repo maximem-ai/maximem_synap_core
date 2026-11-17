@@ -1,8 +1,8 @@
 """Only ``shared/edition.py`` may name ``SYNAP_EDITION``.
 
 The edition is one decision made in one place. A second reader
-would be an ``if edition == ...`` check by another route, and the sync would
-then ship a Cloud-versus-Core difference nobody can find by reading the module.
+would be an ``if edition == ...`` check by another route, and a Cloud-versus-Core
+difference would then exist that nobody can find by reading the module.
 """
 
 from __future__ import annotations

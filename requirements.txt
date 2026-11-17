@@ -1,9 +1,8 @@
 # Synap Core server dependencies.
 #
-# Built from what the shipped files import, not copied from Cloud's list: Cloud's file leaves out
-# several packages the shipped code imports (python-dateutil, rapidfuzz, typer, rich, anthropic) and
-# relies on them arriving as dependencies of something else. `core_sync.py deps` fails if a package
-# the shipped code imports is missing here. Versions are Cloud's, which the engine is tested against.
+# Built from what the engine imports. Every package it imports is listed here, including
+# python-dateutil, rapidfuzz, typer, rich and anthropic, so none relies on arriving as a dependency
+# of something else. The versions are the ones the engine is tested against.
 #
 # torch is installed first, CPU-only, by the Dockerfile (it saves about 3.5 GB). Not listed here.
 

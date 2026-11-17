@@ -1,19 +1,15 @@
 """SQLAlchemy ORM models for the tables Core ships: client, instance, client_config.
 
-These classes moved here from ``synap.cloud.auth.models.orm`` (the ``auth`` folder
-stays behind in Core, so a Core tree could not import its own database layer).
-They are defined once, here. ``synap.cloud.auth.models.orm`` imports them back, so
-the old import path gives the same objects.
+They are defined once, here, and Cloud imports them from here, so both editions get
+the same objects.
 
 It sits beside ``connection.py``, not in ``models/``, because importing the
-``models`` package also registers the connector tables (Google Drive, Zendesk),
-which Core does not need.
+``models`` package also registers connector tables, which Core does not need.
 
 ``ClientORM.credentials`` and ``InstanceORM.credentials`` are NOT declared here:
-the ``credential`` table is not a Core table, so the relationships to
-``CredentialORM`` are attached by ``synap.cloud.auth.models.orm`` right after
-``CredentialORM`` is defined. The mapped relationships Cloud ends up with are the
-same as before.
+the ``credential`` table is not a Core table, so Cloud attaches those
+relationships right after it defines ``CredentialORM``. The mapped relationships
+Cloud ends up with are the same as before.
 """
 
 from datetime import datetime, timezone
@@ -193,9 +189,9 @@ class ClientConfigORM(Base):
 
 
 # Cloud only: the credential relationships of ClientORM and InstanceORM are attached
-# by synap.cloud.auth.models.orm. Load it here so that in Cloud they exist before
-# any mapper can configure, whichever module a process imports first. In a Core tree
-# the auth folder is absent and this does nothing. Only "auth is missing" is
+# by Cloud's own models. Load them here so that in Cloud they exist before
+# any mapper can configure, whichever module a process imports first. In Core
+# that module is absent and this does nothing. Only "auth is missing" is
 # swallowed; any other import error in Cloud still raises. (Circular on purpose:
 # that module imports the classes above, which are all defined by this point.)
 try:

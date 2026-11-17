@@ -1,7 +1,7 @@
 """The two route modules, loaded without the rest of the server.
 
-Importing anything under ``admin_api.routes`` runs the package ``__init__``, which
-imports every router and with them stripe, torch, neo4j and the MACA stack. These
+Importing anything under the routes package runs its ``__init__``, which
+imports every router and the heavy dependencies behind them. These
 tests only need the two new modules, so the package and the helpers they import are
 replaced by small stand-ins for the duration of each test and the real files are
 loaded on top. What is under test is the route code: mode dispatch, the refusals,
@@ -27,7 +27,6 @@ from synap.cloud.shared import edition
 PKG = "synap.cloud.application.admin_api.routes"
 ROUTES_DIR = (Path(__file__).resolve().parents[3]
               / "cloud" / "application" / "admin_api" / "routes")
-# The SDK routes moved out of admin_api.
 SDK_PKG = "synap.cloud.application.sdk_api"
 SDK_DIR = (Path(__file__).resolve().parents[3] / "cloud" / "application" / "sdk_api")
 

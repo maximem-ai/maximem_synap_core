@@ -3,7 +3,7 @@
 Core turns SYNAP_GRAPH_PER_SCOPE on, so the graph arm walks the reader's own graph (named by the
 user id), then the customer's graph, and the client's. This file drives the real
 ``RetrievalManager._neo4j_graph_discovery`` with a fake graph keyed by those ids, and asserts on
-the items that come out. It needs nothing from a Cloud-only folder, so it ships to the Core tree.
+the items that come out. It needs nothing from a Cloud-only folder, so it runs in Core.
 
 Two separate defences are tested, because either one alone would hide a break in the other:
 

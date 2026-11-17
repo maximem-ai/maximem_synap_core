@@ -4,11 +4,9 @@ Thanks for your interest. Please read the next section before writing any code, 
 
 ## How this repository works
 
-The engine under `synap/` is developed in Maximem's source repository and copied here by an automated sync. **Everything under `synap/` is overwritten on each sync.** These paths are maintained in this repository and the sync never touches them: `deploy/`, `config/`, `e2e/`, `skills/`, `Dockerfile`, `requirements.txt`, `.env.example`, `.github/`, and the files at the root (README, LICENSE, NOTICE, SECURITY.md and this file).
+The engine under `synap/` is maintained by the Maximem team, so a change to it starts as an issue. Pull requests are welcome for everything around it: `deploy/`, `config/`, `e2e/`, `skills/`, `Dockerfile`, `requirements.txt`, `.env.example`, `.github/`, and the files at the root (README, LICENSE, NOTICE, SECURITY.md and this file).
 
-That has one practical consequence:
-
-> **Pull requests against `synap/` will be closed.** Not because the change is unwelcome, but because merging it here would be silently reverted the next time the sync runs.
+> **Open an issue before changing `synap/`.** Pull requests that change it directly are closed, even when the change is welcome: we make it ourselves once the issue is accepted.
 
 So instead:
 
@@ -21,9 +19,9 @@ So instead:
 | Change the engine in `synap/` | Open an issue first |
 | Read, run or debug the code against your own app | [Working with the code locally](#working-with-the-code-locally) below |
 
-Accepted issues are implemented in the source repository. The fix appears here on the next sync, and in the published image at the next release.
+Accepted issues are implemented by the maintainers and ship in the next release of the published image.
 
-**Every pull request runs a check** ([`.github/workflows/check.yml`](.github/workflows/check.yml)), with no secret and no model key, so it also runs for a pull request from a fork. It checks that the Compose file is valid (every service caps its log, every store has a healthcheck and the server waits for it, no store publishes a port), runs the setup skill's tests, and builds the image. It does **not** run the end-to-end suite, which needs a model key: run it yourself for a change to `deploy/`, `config/`, the `Dockerfile` or `.env.example`, as described below. The unit tests under `synap/tests` run in the source repository against exactly the files that ship here.
+**Every pull request runs a check** ([`.github/workflows/check.yml`](.github/workflows/check.yml)), with no secret and no model key, so it also runs for a pull request from a fork. It checks that the Compose file is valid (every service caps its log, every store has a healthcheck and the server waits for it, no store publishes a port), runs the setup skill's tests, and builds the image. It does **not** run the end-to-end suite, which needs a model key: run it yourself for a change to `deploy/`, `config/`, the `Dockerfile` or `.env.example`, as described below. The unit tests under `synap/tests` are run by the maintainers.
 
 ## Reporting an issue
 

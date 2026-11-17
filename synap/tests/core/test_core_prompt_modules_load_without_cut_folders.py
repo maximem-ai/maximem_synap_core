@@ -1,9 +1,8 @@
 """Every Core prompt module loads when the folders Core does not ship are missing.
 
-The S9 wiring tests ran in the full monorepo, where ``agents/memory_architecture``
-exists, so four Core prompt files that imported it passed here and would have
-failed in a Core tree the first time ingestion started. This test blocks the
-folders that stay behind and imports every ``prompts/core`` module.
+A test run where every folder exists can pass a Core prompt file that imports a folder
+Core does not have, and that file would then fail the first time ingestion started.
+This test blocks the folders Core does not have and imports every ``prompts/core`` module.
 """
 
 from __future__ import annotations

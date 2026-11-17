@@ -26,6 +26,9 @@ HERE = Path(__file__).resolve().parent
 BASELINE = HERE / "baseline.sql"
 MIGRATIONS = HERE / "core_migrations"
 BASELINE_VERSION = "baseline"
+# The baseline as first released had a different comment on its first line. A database built from
+# that copy recorded this checksum, and the same schema must still be accepted.
+_RELEASED_BASELINES = {"b46942389dc9b3e9eda1406dfbd87c79cc6151afdae352dc4b56c9732f5901d6"}
 # Two processes starting together must not both apply the baseline.
 _LOCK_KEY = 0x53594E41  # "SYNA"
 
@@ -102,7 +105,8 @@ async def migrate(
             done[BASELINE_VERSION] = _checksum(sql)
             applied.append(BASELINE_VERSION)
             log("schema: applied the baseline")
-        elif baseline.is_file() and done[BASELINE_VERSION] != _checksum(baseline.read_text()):
+        elif (baseline.is_file() and done[BASELINE_VERSION] != _checksum(baseline.read_text())
+              and done[BASELINE_VERSION] not in _RELEASED_BASELINES):
             raise MigrationError("baseline.sql differs from the one this database was built from; it must never change after a release")
 
         for path in files:

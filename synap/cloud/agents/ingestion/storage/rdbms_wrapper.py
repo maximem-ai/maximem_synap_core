@@ -358,8 +358,7 @@ class AsyncRDBMSWrapper:
         memory that inline KU would later be asked to undo. It is not fine for
         a retirement, because a no-op audit means a memory that can never be
         restored, and the only way to find that out would be to need the undo.
-        The one caller that reached this path (admin_api ConsolidationManager)
-        is retired at construction under D-023.
+        The one caller that reached this path is retired at construction.
         """
         raise NotImplementedError(
             "retire_memory_with_audit is not implemented on the sync RDBMS "

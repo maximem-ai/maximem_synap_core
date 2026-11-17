@@ -25,5 +25,5 @@ def test_with_no_hook_the_remote_provider_uses_the_local_model(no_hooks, monkeyp
 
 
 def test_the_engine_file_imports_no_remote_client():
-    # The scrub rule (scripts/oss/scrub_patterns.list) keeps the service's settings out of every shipped file.
+    # The engine file does not import the remote embedding client.
     assert "remote_embedding_client" not in inspect.getsource(startup)

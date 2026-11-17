@@ -21,7 +21,7 @@ from synap.cloud.shared.step_logger import StepLogger
 from opentelemetry import context as otel_context, propagate as otel_propagate
 from synap.cloud.observability.tracing import start_span, set_current_span_attributes
 
-if TYPE_CHECKING:  # type hint only: Core does not ship synap/providers/reporting (allowlist.yml)
+if TYPE_CHECKING:  # type hint only
     from synap.providers.reporting import ReportingStoreInterface
 
 

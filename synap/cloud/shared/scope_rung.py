@@ -48,10 +48,8 @@ available to the SDK at all. Level keys are `^[a-z][a-z0-9_]{0,63}$`, enforced
 by `ladder_validation`, so a key can hold neither separator and only the value
 needs escaping. Values are the client's own external ids and can hold anything.
 
-Kept deliberately dull, because it is written three times: here, in
-`maximem_synap.cache.anticipation_cache`, and in the JS SDK's
-`anticipation-cache.ts`. The golden vectors in
-`synap/sdk/CONTRACT/behavior/anticipation.json` are what stops the three drifting.
+Kept deliberately dull, because it is written three times: here and in each
+of the two SDKs. Shared golden vectors are what stop the three drifting.
 """
 from __future__ import annotations
 

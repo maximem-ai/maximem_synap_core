@@ -1,10 +1,8 @@
 """Metrics counters and security log lines, through hooks.
 
-``observability/metrics.py`` and ``observability/request_fields.py`` stay behind
-(Core ships only ``tracing.py`` and ``bootstrap.py`` of that folder). Engine files
-that used to import ``inc_counter``, ``log_rate_limited`` or ``log_pool_timeout``
-from there import the same names from here instead. Cloud's hooks
-(``cloud_hooks/application.py``) call the originals with the same arguments; in
+Engine files that used to import ``inc_counter``, ``log_rate_limited`` or
+``log_pool_timeout`` from the metrics modules import the same names from here
+instead. Cloud registers hooks that call the originals with the same arguments; in
 Core nothing is registered and each call does nothing.
 """
 
@@ -27,7 +25,7 @@ def _signal(hook: str, *args: Any, **kwargs: Any) -> None:
 
 
 def inc_counter(*args: Any, **kwargs: Any) -> None:
-    """``observability.metrics.inc_counter`` (name, amount, labels, help_text)."""
+    """The metrics counter hook (name, amount, labels, help_text)."""
     _signal("metrics_counter", *args, **kwargs)
 
 

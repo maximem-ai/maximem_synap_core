@@ -50,7 +50,7 @@ def test_every_live_row_predicate_also_excludes_forgotten_memories():
 def test_the_guard_actually_finds_the_known_readers():
     """If the pattern stopped matching, the test above would pass on nothing."""
     hits = sum(len(_LIVE.findall(src)) for _, src in _sources())
-    # 15 in the monorepo; 14 in Core, where one consolidation file does not ship. The minimum
+    # 14 in Core, where one consolidation file does not ship (15 where it does). The minimum
     # that holds in both: the point is that the pattern still matches, not the exact count.
     assert hits >= 14, f"expected the known live-row predicates, found {hits}"
 

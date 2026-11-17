@@ -2,7 +2,7 @@
 
 Both SDKs call this when they start and read the client id, the instance id and
 the scoping mode from the answer. Cloud's route lives in ``admin_api``, which
-stays behind, so Core has its own here. The response has the same fields as
+is not in Core, so Core has its own here. The response has the same fields as
 Cloud's.
 """
 

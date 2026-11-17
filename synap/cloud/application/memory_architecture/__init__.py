@@ -4,8 +4,7 @@ Service for managing memory architecture configuration lifecycle.
 
 The names below load on first use (PEP 562), not when the package is imported.
 Importing a submodule such as ``configurators.storage`` runs this file first, and
-most of these names live in files that need Cloud-only folders (the admin API,
-the S3 config store). Core ships only ``configurators`` and ``models``, so an
+most of these names live in files that need folders Core does not have. Core ships only ``configurators`` and ``models``, so an
 eager import here would stop the embedding client and the ingestion workers from
 loading. Cloud sees the same names, imported the first time they are asked for.
 """

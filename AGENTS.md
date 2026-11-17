@@ -8,7 +8,7 @@ Synap Core is the open-source, self-hosted edition of Maximem Synap's memory eng
 
 ## Layout
 
-- `synap/`: the engine (`cloud/` API, ingestion, retrieval, compaction and the memory browser; `providers/`; `contracts/`; `db/`; `boot/`; `tests/`). Mirrored from a private repository.
+- `synap/`: the engine (`cloud/` API, ingestion, retrieval, compaction and the memory browser; `providers/`; `contracts/`; `db/`; `boot/`; `tests/`). Maintained by the Maximem team.
 - `deploy/docker-compose.yml`: the server and its four stores. The API binds to `127.0.0.1:8000`.
 - `config/`: `memory.yml` (the starter memory config) and `samples/business-app.yml`.
 - `skills/synap-core/`: the setup skill for coding agents, with `reference/` and `scripts/`.
@@ -33,14 +33,14 @@ The first start downloads about 2.3 GiB of models. On Linux, prefix `SYNAP_USER=
   `python -m venv .venv && . .venv/bin/activate && pip install -r e2e/requirements.txt && cd e2e && pytest`.
   It needs Docker, port 8000 free and a model in `.env`. It starts its own Compose project and never touches your `.env`, `config/` or `originals/`. Details: [e2e/README.md](e2e/README.md).
 - Run it before proposing a change to `deploy/`, `config/`, the `Dockerfile` or `.env.example`.
-- The unit tests in `synap/tests/` are run in the source repository (CONTRIBUTING.md). No command to run them here is documented; do not guess one, ask the human or read `synap/tests/conftest.py`.
+- The unit tests in `synap/tests/` are run by the maintainers (CONTRIBUTING.md). No command to run them here is documented; do not guess one, ask the human or read `synap/tests/conftest.py`.
 - The setup skill's tests need nothing running: `python -m pytest skills/synap-core/tests`.
 - Every pull request runs `.github/workflows/check.yml` (Compose file checks, the skill tests, an image build). It does not run the end-to-end suite.
 
 ## Rules
 
 - Never commit, print, echo or open `.env` or any key, token or password. Check settings by name only. Do not paste keys into issues or pull requests.
-- Do not edit `synap/`. It is overwritten on every sync from a private repository, so pull requests that change it are closed. For an engine bug or gap, open an issue instead. Pull requests are welcome for `deploy/`, `config/`, `e2e/`, `skills/`, the `Dockerfile` and the docs files.
+- Do not edit `synap/`. Pull requests that change it are closed. For an engine bug or gap, open an issue instead. Pull requests are welcome for `deploy/`, `config/`, `e2e/`, `skills/`, the `Dockerfile` and the docs files.
 - Sign off every commit (`git commit -s`, DCO). Keep changes small and do one thing per pull request.
 - Do not run `docker compose down -v`, delete volumes, or delete `originals/` without an explicit yes from the human: that deletes stored memories.
 - The scoping mode (`equals_customer` or `strict` in `config/memory.yml`) is final once the first memory exists.

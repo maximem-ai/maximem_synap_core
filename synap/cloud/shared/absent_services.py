@@ -2,7 +2,7 @@
 
 ``main.py`` starts its background services one by one, each in its own try block that logs a warning
 (or, for the PII gate, an error) with a traceback when the start fails. In Core most of those services
-are not shipped: the credits, billing, email, connector and PII packages stay behind, so the import at
+are not shipped: those service packages are not in Core, so the import at
 the top of each block raises ``ModuleNotFoundError``. That is not a failure, and a developer reading the
 log for the first time should not see thirty stack traces and a line saying documents are ingested
 without PII detection.

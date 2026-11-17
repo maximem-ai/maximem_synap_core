@@ -24,7 +24,7 @@ All hook names are declared once, in ``HOOK_NAMES``. Registering or calling a
 name that is not declared raises ``UndeclaredHook``. A declared hook with
 nothing registered does nothing and returns ``None``. Cloud registers the real
 functions the first time a hook is used: ``call``, ``acall`` and ``is_registered``
-import ``synap.cloud.cloud_hooks`` and run its ``register_all`` once, in every Cloud process (the consolidation
+import Cloud's hooks package and run its ``register_all`` once, in every Cloud process (the consolidation
 runner and the MCP service never import main.py). If that import fails, the call
 raises ``RuntimeError`` and the next call tries again. Core never imports it and
 registers nothing.
@@ -336,7 +336,7 @@ runs_cloud_services: bool = _edition.runs_cloud_services
 # Every hook the engine may call. Add a name here before registering or calling it.
 HOOK_NAMES: Tuple[str, ...] = (
     # Ingestion. Several of these serve more than one call site and take
-    # the site name as their first argument (see cloud_hooks/ingestion.py).
+    # the site name as their first argument.
     "pii_ingestion",
     "billing_charge",
     "analytics",
@@ -383,9 +383,9 @@ HOOK_NAMES: Tuple[str, ...] = (
     "provider_guard_messages",
     "provider_guard_response",
     # The Jev re-rank of retrieval candidates ("enabled" / "items"), called
-    # from client_api/retrieval_manager.py. jev_rerank.py stays behind.
+    # from client_api/retrieval_manager.py.
     "jev_rerank",
-    # Graph and entity resolution (cloud_hooks/graph.py). The judge steps and
+    # Graph and entity resolution. The judge steps and
     # what they need, the question generator (HQE), the per-provider prompt variants.
     "entity_judge_llm",
     "entity_judges",
@@ -393,10 +393,9 @@ HOOK_NAMES: Tuple[str, ...] = (
     "ingestion_prompt_variants",
     # The separate entity extractor (one LLM call for entities, then another for relationships). Cloud's
     # older graph path uses it; Core extracts entities and relationships in one call (graph extraction
-    # v2) and has no entity prompt, so the hook returns None there and the file stays behind.
+    # v2) and has no entity prompt, so the hook returns None there and that file is not in Core.
     "ingestion_entity_extractor",
-    # Metrics counters and security log lines (observability/metrics.py and
-    # request_fields.py stay behind). Reached through shared/hook_signals.py.
+    # Metrics counters and security log lines. Reached through shared/hook_signals.py.
     "metrics_counter",
     "security_log",
     # The PII gate on one stored conversation turn (conversation/tracker.py). Core has no
