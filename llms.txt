@@ -30,7 +30,7 @@ Accurate mode serves a graph statement only while a live memory supports it. `sd
 
 ## Project
 
-- [Contributing](https://github.com/maximem-ai/maximem_synap_core/blob/main/CONTRIBUTING.md): what pull requests are accepted (for a change to the engine under synap/, open an issue first), DCO sign-off, and how to run the tests
+- [Contributing](https://github.com/maximem-ai/maximem_synap_core/blob/main/CONTRIBUTING.md): what pull requests are accepted (a change to the engine under synap/ needs an issue labelled approved first), DCO sign-off, and how to run the tests
 - [Security policy](https://github.com/maximem-ai/maximem_synap_core/blob/main/SECURITY.md): how to report a vulnerability privately, and how to run Core safely
 - [Notice](https://github.com/maximem-ai/maximem_synap_core/blob/main/NOTICE): licensing and attribution for third-party components
 

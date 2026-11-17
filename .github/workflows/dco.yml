@@ -1,0 +1,41 @@
+name: DCO
+
+# Every commit in a pull request must carry a "Signed-off-by:" line with the same email as the commit's author
+# (git commit -s). Runs with no secret, so it also runs for a pull request from a fork.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dco-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  signoff:
+    name: Commits are signed off
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Every commit has a sign-off
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          missing=0
+          for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            name=$(git log -1 --format=%an "$c")
+            [ "$name" = "dependabot[bot]" ] && continue
+            email=$(git log -1 --format=%ae "$c")
+            if ! git log -1 --format=%B "$c" | grep -i '^Signed-off-by:' | grep -qiF "<$email>"; then
+              echo "::error::Commit ${c:0:12} has no Signed-off-by line for <$email>. Fix it with: git commit --amend -s (last commit) or git rebase --signoff main"
+              missing=1
+            fi
+          done
+          exit $missing

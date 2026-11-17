@@ -416,7 +416,7 @@ The Synap Core section of [docs.maximem.ai](https://docs.maximem.ai/core/quickst
 
 ## Contributing
 
-Bug reports, questions and ideas are very welcome as [issues](https://github.com/maximem-ai/maximem_synap_core/issues) and in [Discussions](https://github.com/maximem-ai/maximem_synap_core/discussions). Pull requests are welcome for the setup around the engine (`deploy/`, `config/`, `e2e/`, `skills/`, the docs). The engine under `synap/` is maintained by the Maximem team, and a pull request that changes it is closed: open an issue instead. Every commit needs a DCO sign-off (`git commit -s`). See [CONTRIBUTING.md](CONTRIBUTING.md).
+Bug reports, questions and ideas are very welcome as [issues](https://github.com/maximem-ai/maximem_synap_core/issues) and in [Discussions](https://github.com/maximem-ai/maximem_synap_core/discussions). Pull requests are welcome for the setup around the engine (`deploy/`, `config/`, `e2e/`, `skills/`, the docs). The engine under `synap/` is maintained by the Maximem team, and a pull request that changes it is accepted only for an issue labelled `approved`: open an issue first. Every commit needs a DCO sign-off (`git commit -s`). See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 

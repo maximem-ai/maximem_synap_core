@@ -40,7 +40,7 @@ The first start downloads about 2.3 GiB of models. On Linux, prefix `SYNAP_USER=
 ## Rules
 
 - Never commit, print, echo or open `.env` or any key, token or password. Check settings by name only. Do not paste keys into issues or pull requests.
-- Do not edit `synap/`. Pull requests that change it are closed. For an engine bug or gap, open an issue instead. Pull requests are welcome for `deploy/`, `config/`, `e2e/`, `skills/`, the `Dockerfile` and the docs files.
+- Do not edit `synap/` unless the issue you are working on is labelled `approved` and assigned to your human; other pull requests that change it are closed. For an engine bug or gap, open an issue first. Pull requests are welcome for `deploy/`, `config/`, `e2e/`, `skills/`, the `Dockerfile` and the docs files.
 - Sign off every commit (`git commit -s`, DCO). Keep changes small and do one thing per pull request.
 - Do not run `docker compose down -v`, delete volumes, or delete `originals/` without an explicit yes from the human: that deletes stored memories.
 - The scoping mode (`equals_customer` or `strict` in `config/memory.yml`) is final once the first memory exists.

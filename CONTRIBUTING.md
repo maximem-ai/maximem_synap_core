@@ -4,9 +4,9 @@ Thanks for your interest. Please read the next section before writing any code, 
 
 ## How this repository works
 
-The engine under `synap/` is maintained by the Maximem team, so a change to it starts as an issue. Pull requests are welcome for everything around it: `deploy/`, `config/`, `e2e/`, `skills/`, `Dockerfile`, `requirements.txt`, `.env.example`, `.github/`, and the files at the root (README, LICENSE, NOTICE, SECURITY.md and this file).
+The engine under `synap/` is maintained by the Maximem team. Pull requests are welcome for everything around it: `deploy/`, `config/`, `e2e/`, `skills/`, `Dockerfile`, `requirements.txt`, `.env.example`, `.github/`, and the files at the root (README, LICENSE, NOTICE, SECURITY.md and this file).
 
-> **Open an issue before changing `synap/`.** Pull requests that change it directly are closed, even when the change is welcome: we make it ourselves once the issue is accepted.
+> **Open an issue before changing `synap/`.** When a maintainer labels it `approved`, a pull request for that issue is welcome. A pull request that changes `synap/` without an approved issue is closed.
 
 So instead:
 
@@ -16,10 +16,10 @@ So instead:
 | Ask how something works, or suggest an idea | [Discussions](https://github.com/maximem-ai/maximem_synap_core/discussions), and the [docs](https://docs.maximem.ai/core/quickstart) |
 | Report a security problem | Privately, see [SECURITY.md](SECURITY.md) |
 | Improve the setup (`deploy/`, `config/`, `e2e/`, `skills/`, the Dockerfile, the docs files) | Open a pull request |
-| Change the engine in `synap/` | Open an issue first |
+| Change the engine in `synap/` | Open an issue first. Once it is labelled `approved`, send a pull request for it |
 | Read, run or debug the code against your own app | [Working with the code locally](#working-with-the-code-locally) below |
 
-Accepted issues are implemented by the maintainers and ship in the next release of the published image.
+Accepted issues are implemented by the maintainers, or by the contributor an approved issue is assigned to, and ship in the next release of the published image.
 
 **Every pull request runs a check** ([`.github/workflows/check.yml`](.github/workflows/check.yml)), with no secret and no model key, so it also runs for a pull request from a fork. It checks that the Compose file is valid (every service caps its log, every store has a healthcheck and the server waits for it, no store publishes a port), runs the setup skill's tests, and builds the image. It does **not** run the end-to-end suite, which needs a model key: run it yourself for a change to `deploy/`, `config/`, the `Dockerfile` or `.env.example`, as described below. The unit tests under `synap/tests` are run by the maintainers.
 
@@ -101,12 +101,12 @@ We use the [Developer Certificate of Origin](https://developercertificate.org/),
 git commit -s -m "Describe the change"
 ```
 
-This adds `Signed-off-by: Your Name <you@example.com>` and states that you have the right to submit the change under the Apache License 2.0.
+This adds `Signed-off-by: Your Name <you@example.com>` and states that you have the right to submit the change under the Apache License 2.0. The email must be the one on the commit. A check on every pull request fails when a commit has no matching sign-off; to fix it, run `git commit --amend -s` for the last commit, or `git rebase --signoff main` for several, then push again.
 
 ## Pull request checklist
 
 - The change is small, does one thing, and the description says why.
-- It does not touch `synap/` (engine changes start as an issue).
+- A change to `synap/` fixes an issue labelled `approved`.
 - Every commit is signed off.
 - No secrets, keys, personal data or internal addresses anywhere in the diff.
 - If it changes `deploy/`, `config/` or `.env.example`, the end-to-end suite passes and the README still tells the truth.
