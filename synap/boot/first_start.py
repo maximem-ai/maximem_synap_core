@@ -112,6 +112,21 @@ def _size(n: float) -> str:
     return f"{n / 1e9:.2f} GB" if n >= 1e9 else f"{n / 1e6:.1f} MB"
 
 
+def _content_range_total(value: str | None) -> int | None:
+    """The total size in a ``Content-Range: bytes */<total>`` header, or None.
+
+    A 416 answer carries one, which is how a server says "there is nothing after the byte you
+    asked for, and the whole file is this long" without a second request."""
+    if not value:
+        return None
+    unit, _, rest = value.partition(" ")
+    if unit.strip().lower() != "bytes" or "/" not in rest:
+        return None
+    # The total follows the "/", and a 416 puts a "*" where the span goes: `bytes */1234`.
+    total = rest.rsplit("/", 1)[1].strip()
+    return int(total) if total.isdigit() else None
+
+
 def _fetch(url: str, dest: Path, *, attempts: int = ATTEMPTS, log=print) -> None:
     """Download to ``dest.part`` and resume it if a run was cut off.
 
@@ -157,6 +172,34 @@ def _fetch(url: str, dest: Path, *, attempts: int = ATTEMPTS, log=print) -> None
                                 f"({100 * done // total}%), {rate / 1e6:.1f} MB/s")
             if total and done != total:
                 raise ConnectionError(f"the connection closed early, at {_size(done)} of {_size(total)}")
+            part.replace(dest)
+            return
+        except urllib.error.HTTPError as e:
+            # A 416 means the server has nothing at or after the byte asked for, which is what a
+            # leftover part from a run that died between its last write and the rename looks like.
+            # The part is either the whole file or longer than it; Content-Range says which.
+            if e.code != 416 or not have:
+                last = e
+                log(f"first-start: {dest.name}: attempt {n} of {attempts} failed "
+                    f"({type(e).__name__}: {e})")
+                if n < attempts:
+                    time.sleep(min(5 * n, 30))
+                continue
+            total = _content_range_total(e.headers.get("Content-Range"))
+            if total is not None and have > total:
+                part.unlink(missing_ok=True)
+                last = e
+                log(f"first-start: {dest.name}: the part was longer than the file "
+                    f"({_size(have)} of {_size(total)}); starting again")
+                continue
+            if total is not None and have < total:
+                # The server refuses the range although the part is short: nothing to resume.
+                part.unlink(missing_ok=True)
+                last = e
+                log(f"first-start: {dest.name}: the server refused to resume at {_size(have)}; starting again")
+                continue
+            # Complete (or the server did not say how long the file is): hand it over and let the
+            # caller's hash check decide, which is what it does for every other download.
             part.replace(dest)
             return
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as e:

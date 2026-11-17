@@ -29,10 +29,17 @@ def _wheel(extra: dict | None = None) -> bytes:
 
 
 class Origin:
-    """A local stand-in for Hugging Face and GitHub that counts requests and honours Range."""
+    """A local stand-in for Hugging Face and GitHub that counts requests and honours Range.
 
-    def __init__(self, files: dict[str, bytes]):
+    ``refuse_ranges_past_end`` makes it answer 416 for a range that starts at or after the size,
+    the way a real server does with a fully downloaded file; ``send_content_range`` controls
+    whether that answer carries the ``Content-Range: bytes */<total>`` a real one has."""
+
+    def __init__(self, files: dict[str, bytes], *, refuse_ranges_past_end: bool = False,
+                 send_content_range: bool = True):
         self.files, self.hits = files, []
+        self.refuse_ranges_past_end = refuse_ranges_past_end
+        self.send_content_range = send_content_range
         origin = self
 
         class H(BaseHTTPRequestHandler):
@@ -47,6 +54,13 @@ class Origin:
                     return
                 rng = self.headers.get("Range")
                 start = int(re.match(r"bytes=(\d+)-", rng).group(1)) if rng else 0
+                if origin.refuse_ranges_past_end and start >= len(body):
+                    self.send_response(416)
+                    if origin.send_content_range:
+                        self.send_header("Content-Range", f"bytes */{len(body)}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 self.send_response(206 if start else 200)
                 self.send_header("Content-Length", str(len(body) - start))
                 self.end_headers()
@@ -169,6 +183,88 @@ def test_a_cut_off_download_resumes_instead_of_starting_over(world, tmp_path):
     fs.run(tmp_path, source, log=lambda *_: None)
     assert (snap / "model.safetensors").stat().st_size == 300_000
     assert not (snap / "model.safetensors.part").exists()
+
+
+def _complete_part(tmp_path, body: bytes):
+    """A part holding the whole file: what a run that died before its rename leaves behind."""
+    snap = tmp_path / "models--Snowflake--snowflake-arctic-embed-l-v2.0" / "snapshots" / fs.EMBEDDING_REVISION
+    snap.mkdir(parents=True)
+    part = snap / "model.safetensors.part"
+    part.write_bytes(body)
+    return snap, part
+
+
+def _origin_with_416(monkeypatch, served, *, send_content_range: bool):
+    origin = Origin(served, refuse_ranges_past_end=True, send_content_range=send_content_range)
+    source = fs.Source(embedding_url=origin.base + "/{repo}/resolve/{revision}/{path}",
+                       spacy_url=origin.base + f"/{fs.SPACY_WHEEL}",
+                       entity_model_url=origin.base + "/{repo}/resolve/{revision}/{path}")
+    return origin, source
+
+
+def test_a_complete_part_left_by_a_crash_is_moved_into_place(world, tmp_path, monkeypatch):
+    """416 on the resume request: the part is the whole file, so the rename the crash skipped is done."""
+    origin, source, served = world
+    origin.close()
+    key = f"/{fs.EMBEDDING_REPO}/resolve/{fs.EMBEDDING_REVISION}/model.safetensors"
+    snap, part = _complete_part(tmp_path, served[key])
+    origin, source = _origin_with_416(monkeypatch, served, send_content_range=True)
+    try:
+        fs.run(tmp_path, source, log=lambda *_: None)
+        assert (snap / "model.safetensors").read_bytes() == served[key]
+        assert not part.exists()
+        assert (tmp_path / fs.MARKER).exists()
+        # the complete part was not downloaded again
+        assert origin.hits.count(key) == 1
+    finally:
+        origin.close()
+
+
+def test_a_complete_part_is_moved_into_place_without_a_content_range(world, tmp_path, monkeypatch):
+    """A server that omits Content-Range still gets the part handed over; the hash check decides."""
+    origin, source, served = world
+    origin.close()
+    key = f"/{fs.EMBEDDING_REPO}/resolve/{fs.EMBEDDING_REVISION}/model.safetensors"
+    snap, part = _complete_part(tmp_path, served[key])
+    origin, source = _origin_with_416(monkeypatch, served, send_content_range=False)
+    try:
+        fs.run(tmp_path, source, log=lambda *_: None)
+        assert (snap / "model.safetensors").read_bytes() == served[key]
+        assert not part.exists()
+    finally:
+        origin.close()
+
+
+def test_a_part_longer_than_the_file_is_discarded_and_fetched_again(world, tmp_path, monkeypatch):
+    """Content-Range says how long the file is, so an over-long part is thrown away, not used."""
+    origin, source, served = world
+    origin.close()
+    key = f"/{fs.EMBEDDING_REPO}/resolve/{fs.EMBEDDING_REVISION}/model.safetensors"
+    snap, part = _complete_part(tmp_path, served[key] + b"trailing")
+    origin, source = _origin_with_416(monkeypatch, served, send_content_range=True)
+    try:
+        fs.run(tmp_path, source, log=lambda *_: None)
+        assert (snap / "model.safetensors").read_bytes() == served[key]
+        assert not part.exists()
+        assert origin.hits.count(key) >= 2  # the 416, then a fresh GET
+    finally:
+        origin.close()
+
+
+def test_a_bad_complete_part_fails_the_hash_check_and_is_deleted(world, tmp_path, monkeypatch):
+    """Moving it into place does not skip verification: the caller's hash check still runs."""
+    origin, source, served = world
+    origin.close()
+    key = f"/{fs.EMBEDDING_REPO}/resolve/{fs.EMBEDDING_REVISION}/model.safetensors"
+    snap, _ = _complete_part(tmp_path, served[key] + b"corrupt")
+    monkeypatch.setattr(fs, "ENTITY_MODEL_FILES", {})
+    origin, source = _origin_with_416(monkeypatch, served, send_content_range=False)
+    try:
+        with pytest.raises(fs.FirstStartError, match="pinned hash"):
+            fs.run(tmp_path, source, log=lambda *_: None)
+        assert not (snap / "model.safetensors").exists()
+    finally:
+        origin.close()
 
 
 def test_a_server_that_fails_is_retried_then_reported(world, tmp_path, monkeypatch):
