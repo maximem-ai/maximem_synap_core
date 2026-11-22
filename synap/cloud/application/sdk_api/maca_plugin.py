@@ -293,17 +293,25 @@ async def _submit(client: httpx.AsyncClient, markdown: str, relationship: str) -
 async def _poll(client: httpx.AsyncClient, job: Job) -> None:
     waited, failures = 0.0, 0
     while True:
+        resp = None
         try:
             resp = await client.get(f"{BUILDS_PATH}/{job.build_id}")
-            failures = 0
         except httpx.RequestError:
+            pass
+        if resp is not None and resp.status_code != 200:
+            if 500 <= resp.status_code < 600:
+                # Cloud flinching while the run goes on: it is still running and still
+                # spending credits, so it is a "ask me again", the same as a network
+                # error, and not a verdict about the run.
+                resp = None
+            else:
+                raise _CloudError(_cloud_error(resp)) from None
+        if resp is None:
             failures += 1
             if failures >= MAX_POLL_FAILURES:
                 raise _CloudError(NETWORK_MESSAGE) from None
-            resp = None
-        if resp is not None:
-            if resp.status_code != 200:
-                raise _CloudError(_cloud_error(resp))
+        else:
+            failures = 0
             try:
                 body = resp.json()
             except ValueError:

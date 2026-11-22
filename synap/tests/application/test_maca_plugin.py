@@ -358,6 +358,85 @@ def test_a_network_error_says_core_keeps_working(env, monkeypatch):
     assert body["status"] == "failed" and "Core keeps working" in body["message"]
 
 
+class PolledCloud:
+    """Answers the poll from ``codes`` in turn, then repeats the last one.
+
+    A code is an HTTP status, or ``"queued"`` for a 200 that says the run goes on.
+
+    The submit is a 202, so only the polling is what the test drives.
+    """
+
+    def __init__(self, codes):
+        self.codes, self.requests = list(codes), []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if request.method == "POST" and request.url.path == mp.BUILDS_PATH:
+            return httpx.Response(202, json={"build_id": "b1"})
+        if request.url.path == f"{mp.BUILDS_PATH}/b1/config":
+            return httpx.Response(200, text=CLOUD_YAML)
+        if request.url.path != f"{mp.BUILDS_PATH}/b1":
+            return httpx.Response(404, json={"detail": "no such route"})
+        code = self.codes.pop(0) if len(self.codes) > 1 else self.codes[0]
+        if code == "queued":
+            return httpx.Response(200, json={"status": "queued"})
+        if code == 200:
+            return httpx.Response(200, json={"status": "succeeded"})
+        return httpx.Response(code, json={"detail": "cloud is flinching"})
+
+
+def _polls(cloud) -> list:
+    """The poll requests alone: the config fetch is a GET on another path."""
+    return [r for r in cloud.requests
+            if r.method == "GET" and r.url.path == f"{mp.BUILDS_PATH}/b1"]
+
+
+def test_a_5xx_while_the_run_goes_on_is_asked_again(env, monkeypatch):
+    """A 502 or 503 is Cloud flinching, not a verdict about the run: the job
+    is still running and still spending credits, so the poll continues."""
+    monkeypatch.setattr(mp, "MAX_POLL_FAILURES", 3)
+    cloud = PolledCloud([502, 503, 200])
+    with TestClient(_app(cloud, monkeypatch)) as c:
+        body = _wait(c, _start(c).json()["job_id"])
+    assert body["status"] == "succeeded"
+    assert len(_polls(cloud)) == 3
+
+
+def test_six_5xx_in_a_row_fails_the_job_the_way_a_network_error_does(env, monkeypatch):
+    """The failure mode is the one that already exists: six of them and the
+    job fails with the message a developer already knows, not a new one."""
+    monkeypatch.setattr(mp, "MAX_POLL_FAILURES", 6)
+    cloud = PolledCloud([500])
+    with TestClient(_app(cloud, monkeypatch)) as c:
+        body = _wait(c, _start(c).json()["job_id"])
+    assert body["status"] == "failed" and "Core keeps working" in body["message"]
+    assert len(_polls(cloud)) == mp.MAX_POLL_FAILURES
+
+
+def test_a_good_poll_resets_the_5xx_count(env, monkeypatch):
+    """Cloud recovering between failures means the run is fine, so the count
+    starts over: four 5xx, a poll that answers queued, four more 5xx and a
+    success is not eight in a row, and the job survives."""
+    monkeypatch.setattr(mp, "MAX_POLL_FAILURES", 6)
+    cloud = PolledCloud([500, 500, 500, 500, "queued", 500, 500, 500, 500, 200])
+    with TestClient(_app(cloud, monkeypatch)) as c:
+        body = _wait(c, _start(c).json()["job_id"])
+    assert body["status"] == "succeeded"
+    assert len(_polls(cloud)) == 10
+
+
+def test_a_4xx_is_still_final_at_once(env, monkeypatch):
+    """A 4xx is Cloud refusing the request, not flinching: nothing is gained
+    by asking again, and the message names the code it got."""
+    monkeypatch.setattr(mp, "MAX_POLL_FAILURES", 6)
+    for code in (401, 402, 404, 429):
+        cloud = PolledCloud([code])
+        with TestClient(_app(cloud, monkeypatch)) as c:
+            body = _wait(c, _start(c).json()["job_id"])
+        assert body["status"] == "failed"
+        assert len(_polls(cloud)) == 1, code
+
+
 def test_a_failed_run_reports_why(env, monkeypatch):
     with TestClient(_app(FakeCloud(steps=("running", "failed")), monkeypatch)) as c:
         body = _wait(c, _start(c).json()["job_id"])
