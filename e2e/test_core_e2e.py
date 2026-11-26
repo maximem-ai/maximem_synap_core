@@ -213,12 +213,17 @@ def test_12_a_conversation_is_recorded_and_compacted(stack):
 
 def test_13_one_memory_can_be_deleted_by_id(stack):
     assert S["alice_ids"], "test 07 stored no memory ids"
-    target = UUID(S["alice_ids"][0])
 
     async def go(sdk):
-        await sdk.memories.delete(target)
-        with pytest.raises(Exception):
-            await sdk.memories.get(target)
+        before = await recall(sdk, ALICE, "preferences", "dark mode")
+        assert any("dark" in t.lower() for t in before), f"dark mode memory not in recall before delete: {before}"
+        for mid in S["alice_ids"]:
+            target = UUID(mid)
+            await sdk.memories.delete(target)
+            with pytest.raises(Exception):
+                await sdk.memories.get(target)
+        recalled = await recall(sdk, ALICE, "preferences", "dark mode")
+        assert not any("dark" in t.lower() for t in recalled), f"deleted memory still in recall: {recalled}"
     with_sdk(stack, go)
 
 
