@@ -1,9 +1,12 @@
 """Context bundle models."""
 
+import re
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 from enum import Enum
+
+_TERMINAL_CONTEXT_TAG_RE = re.compile(r"\n\n\[Context:[^\n]*\]\s*$")
 
 
 class DegradationLevel(Enum):
@@ -140,6 +143,10 @@ class ContextItem:
     # liveness check did not run (SYNAP_GRAPH_SERVE_CHECKS_LIVENESS off).
     graph_kind: Optional[str] = None
     backing_memory_ids: Optional[List[str]] = None
+
+    def __post_init__(self):
+        if self.content:
+            self.content = _TERMINAL_CONTEXT_TAG_RE.sub("", self.content)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
