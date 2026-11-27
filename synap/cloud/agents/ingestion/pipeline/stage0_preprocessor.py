@@ -420,8 +420,79 @@ class Stage0Preprocessor:
 
         return chunks
 
+    def _split_unbroken_string(self, text: str, max_tokens: int) -> List[str]:
+        """Split unbroken text into character chunks guaranteed to fit max_tokens."""
+        if not text:
+            return []
+        chunks = []
+        chars_per_chunk = max(1, max_tokens * 3)
+        start = 0
+        while start < len(text):
+            end = min(start + chars_per_chunk, len(text))
+            chunk = text[start:end]
+            while chunk and self._counter.count(chunk) > max_tokens and end > start + 1:
+                end -= max(1, (end - start) // 4)
+                chunk = text[start:end]
+            chunks.append(chunk)
+            start = end
+        return chunks
+
+    def _split_long_line(self, line: str, max_tokens: int) -> List[str]:
+        """Split an over-budget line by sentences, words, or character slices (#33)."""
+        if not line:
+            return []
+        if self._counter.count(line) <= max_tokens:
+            return [line]
+
+        # 1. Split on sentence boundaries
+        sentences = re.split(r"(?<=[.!?])\s+", line)
+        if len(sentences) > 1:
+            chunks: List[str] = []
+            curr_parts: List[str] = []
+            for sent in sentences:
+                if not sent:
+                    continue
+                if self._counter.count(sent) > max_tokens:
+                    if curr_parts:
+                        chunks.append(" ".join(curr_parts))
+                        curr_parts = []
+                    chunks.extend(self._split_long_line(sent, max_tokens))
+                elif curr_parts and self._counter.count(" ".join(curr_parts + [sent])) > max_tokens:
+                    chunks.append(" ".join(curr_parts))
+                    curr_parts = [sent]
+                else:
+                    curr_parts.append(sent)
+            if curr_parts:
+                chunks.append(" ".join(curr_parts))
+            return chunks
+
+        # 2. Split on whitespace
+        words = line.split(" ")
+        if len(words) > 1:
+            chunks: List[str] = []
+            curr_words: List[str] = []
+            for w in words:
+                if not w:
+                    continue
+                if self._counter.count(w) > max_tokens:
+                    if curr_words:
+                        chunks.append(" ".join(curr_words))
+                        curr_words = []
+                    chunks.extend(self._split_unbroken_string(w, max_tokens))
+                elif curr_words and self._counter.count(" ".join(curr_words + [w])) > max_tokens:
+                    chunks.append(" ".join(curr_words))
+                    curr_words = [w]
+                else:
+                    curr_words.append(w)
+            if curr_words:
+                chunks.append(" ".join(curr_words))
+            return chunks
+
+        # 3. Unbroken text
+        return self._split_unbroken_string(line, max_tokens)
+
     def _force_split(self, content: str, max_tokens: Optional[int] = None) -> List[str]:
-        """Force-split content that exceeds token budget by lines."""
+        """Force-split content that exceeds token budget by lines and sentences/tokens."""
         max_tokens = max_tokens or self._max_tokens
         lines = content.split("\n")
         chunks: List[str] = []
@@ -430,6 +501,13 @@ class Stage0Preprocessor:
 
         for line in lines:
             line_tokens = self._counter.count(line)
+            if line_tokens > max_tokens:
+                if current_lines:
+                    chunks.append("\n".join(current_lines))
+                    current_lines = []
+                    current_tokens = 0
+                chunks.extend(self._split_long_line(line, max_tokens))
+                continue
             if current_tokens + line_tokens > max_tokens and current_lines:
                 chunks.append("\n".join(current_lines))
                 current_lines = []
