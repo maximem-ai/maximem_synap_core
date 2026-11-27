@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from synap.cloud.application.sdk_api.sdk_auth import (
     SDKAuthContext,
@@ -116,6 +116,13 @@ def derive_token_budget(max_results: int, include_source_evidence: bool) -> int:
 # Request / Response models
 # ---------------------------------------------------------------------------
 
+# The whole vocabulary a caller may name in ``ContextFetchRequest.types``.
+# ``DEFAULT_CONTEXT_TYPES`` is the five categories a fetch returns when the
+# caller leaves ``types`` out (or asks for ``"all"``).
+DEFAULT_CONTEXT_TYPES = ["facts", "preferences", "episodes", "emotions", "temporal_events"]
+KNOWN_CONTEXT_TYPES = frozenset({"all", *DEFAULT_CONTEXT_TYPES})
+
+
 class ContextFetchRequest(BaseModel):
     conversation_id: Optional[str] = None
     user_id: Optional[str] = None
@@ -132,6 +139,26 @@ class ContextFetchRequest(BaseModel):
     # Added 2026-10-08. An older server ignores the field.
     max_results_per_query: Optional[int] = None
     types: List[str] = ["all"]
+    # Strict when present (issue #23): a typo'd type used to be dropped and the
+    # fetch silently widened to every enabled category, so a caller asking for
+    # ``["facts"]`` could not tell the filter was ignored. Refuse instead — the
+    # same contract ``scope_path`` already follows.
+    @field_validator("types")
+    @classmethod
+    def _types_must_be_known(cls, v):
+        if not v:
+            raise ValueError(
+                "types must name at least one context type; "
+                f"valid values are 'all' or any of {DEFAULT_CONTEXT_TYPES}"
+            )
+        unknown = sorted(set(v) - KNOWN_CONTEXT_TYPES)
+        if unknown:
+            raise ValueError(
+                f"unknown context type(s) {unknown}; valid values are "
+                f"'all' or any of {DEFAULT_CONTEXT_TYPES}"
+            )
+        return v
+
     mode: str = "fast"
     # SDK-authoritative ST: SDKs with a warm
     # ShortTermContextStore for this conversation pass False to skip the
@@ -2382,8 +2409,6 @@ def get_retrieval_manager() -> RetrievalManager:
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
-
-DEFAULT_CONTEXT_TYPES = ["facts", "preferences", "episodes", "emotions", "temporal_events"]
 
 
 @router.post("/conversation/fetch", response_model=ContextFetchResponse, dependencies=[Depends(require_instance_ready), Depends(enforce_retrieval_rate_limit)])
